@@ -29,10 +29,37 @@ pub fn build(b: *std.Build) void {
     // Override precompile build_options to match our crypto settings
     precompile.addImport("build_options", lib_options_module);
 
+    // Local modules
+    const mpt_mod = b.addModule("mpt", .{
+        .root_source_file = b.path("src/mpt/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mpt_mod.addImport("primitives", primitives);
+
+    const db_mod = b.addModule("db", .{
+        .root_source_file = b.path("src/db/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const executor_mod = b.addModule("executor", .{
+        .root_source_file = b.path("src/executor/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_mod.addImport("primitives", primitives);
+    executor_mod.addImport("context", context);
+    executor_mod.addImport("handler", handler);
+
     const mod = b.addModule("zevm_stateless", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
+    mod.addImport("primitives", primitives);
+    mod.addImport("mpt", mpt_mod);
+    mod.addImport("db", db_mod);
+    mod.addImport("executor", executor_mod);
 
     const exe = b.addExecutable(.{
         .name = "zevm_stateless",
@@ -55,6 +82,9 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("precompile", precompile);
     exe.root_module.addImport("handler", handler);
     exe.root_module.addImport("inspector", inspector);
+    exe.root_module.addImport("mpt", mpt_mod);
+    exe.root_module.addImport("db", db_mod);
+    exe.root_module.addImport("executor", executor_mod);
 
     b.installArtifact(exe);
 

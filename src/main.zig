@@ -1,27 +1,16 @@
 const std = @import("std");
-const zevm_stateless = @import("zevm_stateless");
+const io = @import("io.zig");
+const input = @import("input.zig");
+const executor = @import("executor/main.zig");
+const output = @import("output.zig");
 
 pub fn main() !void {
-    // Prints to stderr, ignoring potential errors.
-    std.debug.print("All your {s} are belong to us.\n", .{"codebase"});
-    try zevm_stateless.bufferedPrint();
-}
+    // 1. Read the StatelessInput from the zkVM input channel
+    const stateless_input = try io.readInput(input.StatelessInput);
 
-test "simple test" {
-    const gpa = std.testing.allocator;
-    var list: std.ArrayList(i32) = .empty;
-    defer list.deinit(gpa); // Try commenting this out and see if zig detects the memory leak!
-    try list.append(gpa, 42);
-    try std.testing.expectEqual(@as(i32, 42), list.pop());
-}
+    // 2. Execute the block against the witness
+    const result = try executor.executeBlock(stateless_input);
 
-test "fuzz example" {
-    const Context = struct {
-        fn testOne(context: @This(), input: []const u8) anyerror!void {
-            _ = context;
-            // Try passing `--fuzz` to `zig build test` and see if it manages to fail this test case!
-            try std.testing.expect(!std.mem.eql(u8, "canyoufindme", input));
-        }
-    };
-    try std.testing.fuzz(Context{}, Context.testOne, .{});
+    // 3. Write the ProofOutput to the zkVM output channel
+    try io.writeOutput(result);
 }
