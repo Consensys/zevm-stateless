@@ -1,9 +1,10 @@
 //! WitnessDatabase: a zevm database backend backed by a state witness.
 //!
-//! Every account and storage read is served from the MPT proofs supplied in
-//! the StatelessInput.  Any access to a key not covered by the witness is
-//! treated as non-existent (returns null / zero), which is the correct
-//! stateless-execution semantics: the prover must include all touched state.
+//! Every account and storage read is served from the flat MPT node pool
+//! (witness.nodes) which mirrors the debug_executionWitness format.  Nodes
+//! are located by keccak256 hash at each step of the trie traversal.
+//!
+//! Contract bytecodes are served from witness.codes by the same hash-scan.
 //!
 //! All methods are allocation-free; linear scans over the (bounded) witness
 //! arrays are acceptable in a zkVM context.
@@ -18,6 +19,13 @@ const input     = @import("input");
 pub const DbError = error{
     /// MPT proof verification failed — witness is inconsistent with state root.
     InvalidWitness,
+};
+
+const EMPTY_TRIE_HASH: primitives.Hash = .{
+    0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6,
+    0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
+    0x5b, 0x48, 0xe0, 0x1b, 0x99, 0x6c, 0xad, 0xc0,
+    0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 };
 
 /// Stateless database built from a proven StateWitness.
@@ -39,48 +47,42 @@ pub const WitnessDatabase = struct {
     // ── basic ───────────────────────────────────────────────────────────────
 
     /// Return basic account info for `address`, or null if the account is
-    /// absent from the trie (valid non-inclusion proof).
+    /// absent from the state trie (valid non-inclusion proof).
     ///
     /// Returns `DbError.InvalidWitness` if the MPT proof is malformed.
     pub fn basic(self: *Self, address: primitives.Address) !?state.AccountInfo {
-        for (self.witness.accounts) |acc| {
-            if (!std.mem.eql(u8, &acc.address, &address)) continue;
+        const account_state = mpt.verifyAccount(
+            self.witness.state_root, address, self.witness.nodes,
+        ) catch return DbError.InvalidWitness;
 
-            const account_state = mpt.verifyAccount(self.witness.state_root, acc) catch
-                return DbError.InvalidWitness;
-
-            const as = account_state orelse return null;
-            return state.AccountInfo{
-                .balance   = as.balance,
-                .nonce     = as.nonce,
-                .code_hash = as.code_hash,
-                // Bytecode is served on demand via codeByHash; set null here
-                // so zevm fetches it through that path when needed.
-                .code = null,
-            };
-        }
-        // Address not in witness → account does not exist in the state trie.
-        return null;
+        const as = account_state orelse return null;
+        return state.AccountInfo{
+            .balance   = as.balance,
+            .nonce     = as.nonce,
+            .code_hash = as.code_hash,
+            // Bytecode is served on demand via codeByHash; set null here
+            // so zevm fetches it through that path when needed.
+            .code = null,
+        };
     }
 
     // ── codeByHash ──────────────────────────────────────────────────────────
 
     /// Return the bytecode whose keccak256 hash is `code_hash`.
     ///
-    /// The code bytes are taken from the matching AccountWitness.  For EOAs
+    /// Contract bytecodes are taken from witness.codes.  For EOAs
     /// (code_hash == KECCAK_EMPTY) an empty `Bytecode` is returned without
-    /// scanning the witness.
+    /// scanning the pool.
     pub fn codeByHash(self: *Self, code_hash: primitives.Hash) !bytecode.Bytecode {
         // Fast path: no code.
         if (std.mem.eql(u8, &code_hash, &primitives.KECCAK_EMPTY)) {
             return bytecode.Bytecode.newLegacy(&.{});
         }
-        // Find the account whose code matches.
-        for (self.witness.accounts) |acc| {
-            if (acc.code.len == 0) continue;
-            const h = mpt.keccak256(acc.code);
+        // Scan the codes pool for a matching hash.
+        for (self.witness.codes) |code_bytes| {
+            const h = mpt.keccak256(code_bytes);
             if (std.mem.eql(u8, &h, &code_hash)) {
-                return bytecode.Bytecode.newLegacy(acc.code);
+                return bytecode.Bytecode.newLegacy(code_bytes);
             }
         }
         // Code not found in witness — return empty (caller will treat as
@@ -92,35 +94,26 @@ pub const WitnessDatabase = struct {
 
     /// Return the value of storage slot `index` for `address`.
     ///
-    /// Returns 0 when the account is absent, the slot is not in the witness,
-    /// or the storage proof shows the slot is empty.
+    /// Returns 0 when the account is absent, the storage root is the
+    /// empty trie, or the storage proof shows the slot is empty.
     pub fn storage(
         self: *Self,
         address: primitives.Address,
         index:   primitives.StorageKey,
     ) !primitives.StorageValue {
         // Resolve the account's storage root first.
-        const storage_root = blk: {
-            for (self.witness.accounts) |acc| {
-                if (!std.mem.eql(u8, &acc.address, &address)) continue;
-                const as = mpt.verifyAccount(self.witness.state_root, acc) catch
-                    return DbError.InvalidWitness;
-                break :blk (as orelse return 0).storage_root;
-            }
-            return 0; // address not in witness
-        };
+        const account_state = mpt.verifyAccount(
+            self.witness.state_root, address, self.witness.nodes,
+        ) catch return DbError.InvalidWitness;
 
-        // Convert StorageKey (u256) to a 32-byte big-endian slot hash.
+        const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
+
+        // Convert StorageKey (u256) to a 32-byte big-endian raw slot hash.
         const slot = u256ToHash(index);
 
-        // Find the matching StorageWitness and verify it.
-        for (self.witness.storage) |sw| {
-            if (!std.mem.eql(u8, &sw.address, &address)) continue;
-            if (!std.mem.eql(u8, &sw.slot, &slot)) continue;
-            return mpt.verifyStorage(storage_root, sw) catch DbError.InvalidWitness;
-        }
-        // Slot not in witness → value is 0 (not touched during this block).
-        return 0;
+        // Verify the storage proof using the shared flat node pool.
+        return mpt.verifyStorage(storage_root, slot, self.witness.nodes)
+            catch return DbError.InvalidWitness;
     }
 
     // ── blockHash ───────────────────────────────────────────────────────────

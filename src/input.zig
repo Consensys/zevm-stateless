@@ -1,42 +1,43 @@
 //! StatelessInput: everything needed to execute a block without full state.
 //!
-//! The prover supplies this to the guest. It contains the block header,
-//! transactions, and a state witness (MPT proofs for all accounts and
-//! storage slots touched during execution).
+//! The witness format mirrors debug_executionWitness (EL JSON-RPC):
+//!   - nodes:   flat pool of RLP-encoded trie node preimages
+//!   - codes:   flat array of contract bytecodes
+//!   - keys:    20-byte account addresses or 52-byte address+storage_slot pairs
+//!   - headers: RLP-encoded block headers (for BLOCKHASH opcode)
+//!
+//! Proof verification works by hash lookup in the pool: given the state_root,
+//! the verifier walks the trie by finding each node via keccak256(node) == expected_hash.
 
 const primitives = @import("primitives");
 
-/// A single account witness: the RLP-encoded node path proving the account
-/// exists (or doesn't) in the state trie at the given address.
-pub const AccountWitness = struct {
-    address: primitives.Address,
-    /// RLP-encoded MPT proof nodes, from root to leaf.
-    proof: []const []const u8,
-    /// Raw contract bytecode.  Empty slice for EOAs.
-    /// Must satisfy keccak256(code) == account.code_hash when non-empty.
-    code: []const u8 = &.{},
-};
-
-/// A storage slot witness: proves the value of a single storage slot.
-pub const StorageWitness = struct {
-    address: primitives.Address,
-    slot: primitives.Hash,
-    proof: []const []const u8,
-};
-
-/// The state witness bundled with a block.
+/// State witness in debug_executionWitness flat-pool format.
 pub const StateWitness = struct {
-    /// Pre-state root that the witness proves against.
+    /// Pre-execution state root (from block header — the trust anchor).
     state_root: primitives.Hash,
-    accounts: []const AccountWitness,
-    storage: []const StorageWitness,
+
+    /// Flat pool of RLP-encoded trie node preimages.
+    /// Nodes are referenced by keccak256(node_bytes) during proof traversal.
+    nodes: []const []const u8,
+
+    /// Contract bytecodes. keccak256(codes[i]) == account.code_hash.
+    codes: []const []const u8,
+
+    /// Accessed state keys for this block:
+    ///   20 bytes = account address
+    ///   52 bytes = account address (20) + storage slot (32)
+    keys: []const []const u8,
+
+    /// RLP-encoded ancestor block headers needed for the BLOCKHASH opcode.
+    headers: []const []const u8,
 };
 
 /// Full input to the guest program.
 pub const StatelessInput = struct {
-    /// RLP-encoded block header.
-    header: []const u8,
-    /// RLP-encoded transactions, in order.
+    /// Decoded block number (from block header).
+    block_number: u64,
+    /// RLP-encoded transactions, in execution order.
     transactions: []const []const u8,
+    /// State witness for Phase 1 (MPT verification) and Phase 2 (database).
     witness: StateWitness,
 };

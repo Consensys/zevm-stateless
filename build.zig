@@ -122,6 +122,25 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
     if (b.args) |args| run_cmd.addArgs(args);
 
+    // gen_example: generate examples/block.json and examples/witness.json
+    const gen_example_exe = b.addExecutable(.{
+        .name = "gen_example",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/gen_example.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives", .module = primitives },
+                .{ .name = "mpt",        .module = mpt_mod    },
+            },
+        }),
+    });
+    b.installArtifact(gen_example_exe);
+
+    const gen_example_step = b.step("gen-example", "Generate examples/block.json and examples/witness.json");
+    const run_gen_example = b.addRunArtifact(gen_example_exe);
+    gen_example_step.dependOn(&run_gen_example.step);
+
     const mod_tests = b.addTest(.{ .root_module = mod });
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });

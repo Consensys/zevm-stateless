@@ -1,14 +1,15 @@
 //! Merkle Patricia Trie: proof verification for stateless execution.
 //!
-//! Verifies that account and storage values are consistent with the
-//! pre-state root declared in the witness before execution begins.
+//! Verification works against a flat node pool (from debug_executionWitness).
+//! For each step, the next node is located by scanning the pool for an entry
+//! whose keccak256 hash matches the expected reference — no pre-assembled
+//! ordered proof paths are needed.
 //!
-//! All functions are allocation-free; 64-byte stack buffers are used for
-//! nibble conversions and HP-decoded path fragments.
+//! All functions are allocation-free; stack buffers are used for nibble paths.
 
 const std = @import("std");
 const primitives = @import("primitives");
-const input = @import("input");
+const input     = @import("input");
 
 const rlp     = @import("rlp.zig");
 const nibbles = @import("nibbles.zig");
@@ -17,14 +18,12 @@ const node    = @import("node.zig");
 // ─── Public types ──────────────────────────────────────────────────────────────
 
 pub const MptError = error{
-    /// Hash mismatch between proof nodes or proof is truncated.
+    /// No node in the pool hashes to the expected value, or pool exhausted.
     InvalidProof,
     /// Malformed node RLP structure (wrong item count, bad types).
     InvalidNode,
     /// Malformed RLP encoding.
     InvalidRlp,
-    /// Leaf suffix does not match the remaining key nibbles.
-    KeyMismatch,
     /// Malformed hex-prefix (compact) encoding.
     InvalidHp,
 };
@@ -45,23 +44,37 @@ pub fn keccak256(data: []const u8) [32]u8 {
     return out;
 }
 
+// ─── findNode ──────────────────────────────────────────────────────────────────
+
+/// Linear scan of the node pool for an entry whose keccak256 equals `hash`.
+/// Returns the raw node bytes, or null if no match is found.
+fn findNode(pool: []const []const u8, hash: primitives.Hash) ?[]const u8 {
+    for (pool) |node_bytes| {
+        if (std.mem.eql(u8, &keccak256(node_bytes), &hash)) return node_bytes;
+    }
+    return null;
+}
+
 // ─── verifyProof ───────────────────────────────────────────────────────────────
 
-/// Traverse a Merkle proof for `key_hash` against `root_hash`.
+/// Traverse the trie for `key_hash` starting from `root_hash`, using the
+/// flat `pool` of node preimages to resolve each hash reference.
 ///
-/// `key_hash` is the keccak256 of the raw key (32 bytes → 64 nibbles).
-/// Returns the leaf value bytes on inclusion, or null on a valid
+/// Returns the leaf value bytes on inclusion, or null for a valid
 /// non-inclusion proof (empty branch child or mismatched leaf suffix).
 pub fn verifyProof(
     root_hash: primitives.Hash,
     key_hash:  primitives.Hash,
-    proof:     []const []const u8,
+    pool:      []const []const u8,
 ) MptError!?[]const u8 {
-    // 1. Convert key to nibbles on the stack.
+    // Empty trie root: non-inclusion is provable without any pool nodes.
+    if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
+
     var key_nibbles: [64]u8 = undefined;
     nibbles.bytesToNibbles(&key_hash, &key_nibbles);
 
-    // 2. Expected linkage for the next proof node.
+    // Tracks the next expected node: either a 32-byte hash (pool lookup)
+    // or an inline RLP encoding (embedded directly in the parent node).
     const ExpectedRef = union(enum) {
         hash:        [32]u8,
         inline_node: []const u8,
@@ -69,18 +82,12 @@ pub fn verifyProof(
     var expected: ExpectedRef = .{ .hash = root_hash };
     var pos: usize = 0;
 
-    // 3. Walk the proof.
-    for (proof) |node_rlp| {
-        // Verify hash / byte linkage to the previous node's child reference.
-        switch (expected) {
-            .hash => |h| {
-                const computed = keccak256(node_rlp);
-                if (!std.mem.eql(u8, &computed, &h)) return error.InvalidProof;
-            },
-            .inline_node => |inl| {
-                if (!std.mem.eql(u8, node_rlp, inl)) return error.InvalidProof;
-            },
-        }
+    while (true) {
+        // Resolve the current node.
+        const node_rlp: []const u8 = switch (expected) {
+            .hash        => |h|   findNode(pool, h) orelse return error.InvalidProof,
+            .inline_node => |inl| inl,
+        };
 
         const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
             error.InvalidRlp  => return error.InvalidRlp,
@@ -93,63 +100,58 @@ pub fn verifyProof(
                 const nibble = key_nibbles[pos];
                 pos += 1;
                 switch (b.children[nibble]) {
-                    .empty => return null, // valid non-inclusion
-                    .hash  => |h|   expected = .{ .hash = h },
+                    .empty       => return null, // valid non-inclusion
+                    .hash        => |h|   expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
 
             .extension => |e| {
-                // HP-decode the shared prefix into a stack buffer.
                 var path_buf: [128]u8 = undefined;
                 const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+                if (hp.is_leaf) return error.InvalidNode;
                 const prefix_nibs = path_buf[0..hp.len];
                 if (pos + prefix_nibs.len > 64) return error.InvalidProof;
-                if (!std.mem.eql(u8, prefix_nibs, key_nibbles[pos .. pos + prefix_nibs.len])) {
-                    return error.InvalidProof;
-                }
+                if (!std.mem.eql(u8, prefix_nibs, key_nibbles[pos .. pos + prefix_nibs.len]))
+                    return null; // prefix diverges → valid non-inclusion
                 pos += prefix_nibs.len;
                 switch (e.child) {
-                    .empty => return null,
-                    .hash  => |h|   expected = .{ .hash = h },
+                    .empty       => return error.InvalidNode,
+                    .hash        => |h|   expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
 
             .leaf => |lf| {
-                // HP-decode the remaining key suffix stored in this leaf.
                 var path_buf: [128]u8 = undefined;
                 const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+                if (!hp.is_leaf) return error.InvalidNode;
                 const suffix_nibs = path_buf[0..hp.len];
-                // If the suffix matches our remaining key → inclusion.
-                // If it doesn't match → non-inclusion (a different key lives here).
+                // Suffix must exactly match the remaining key nibbles.
                 if (suffix_nibs.len != 64 - pos) return null;
                 if (!std.mem.eql(u8, suffix_nibs, key_nibbles[pos..])) return null;
                 return lf.value;
             },
         }
     }
-
-    // Proof exhausted without reaching a leaf or empty branch → invalid.
-    return error.InvalidProof;
 }
 
 // ─── verifyAccount ─────────────────────────────────────────────────────────────
 
-/// Verify an account witness against `state_root`.
+/// Verify that `address` is (or isn't) in the state trie at `state_root`,
+/// using the flat `pool` of node preimages from the witness.
 ///
-/// Returns the decoded AccountState on success, or null if the account is
-/// absent from the trie (valid non-inclusion proof).
+/// Returns the decoded AccountState on inclusion, or null on valid
+/// non-inclusion (address provably absent from the trie).
 pub fn verifyAccount(
     state_root: primitives.Hash,
-    witness:    input.AccountWitness,
+    address:    primitives.Address,
+    pool:       []const []const u8,
 ) MptError!?AccountState {
-    const key_hash = keccak256(&witness.address);
-    const value_opt = try verifyProof(state_root, key_hash, witness.proof);
-    const value = value_opt orelse return null;
+    const key_hash = keccak256(&address);
+    const value = try verifyProof(state_root, key_hash, pool) orelse return null;
 
-    // The account value is RLP-encoded as a 4-item list:
-    //   [nonce, balance, storageRoot, codeHash]
+    // Account value is RLP list: [nonce, balance, storageRoot, codeHash]
     const outer = rlp.decodeItem(value) catch return error.InvalidRlp;
     const payload = switch (outer.item) {
         .list  => |p| p,
@@ -157,30 +159,28 @@ pub fn verifyAccount(
     };
     var rest = payload;
 
-    // nonce (u64, big-endian, stripped leading zeros)
-    const nonce_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const nonce = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp) catch return error.InvalidRlp;
+    const nonce_r   = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const nonce     = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp)
+        catch return error.InvalidRlp;
     rest = rest[nonce_r.consumed..];
 
-    // balance (u256, big-endian, stripped leading zeros)
     const balance_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const balance = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp) catch return error.InvalidRlp;
+    const balance   = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp)
+        catch return error.InvalidRlp;
     rest = rest[balance_r.consumed..];
 
-    // storageRoot (32 bytes)
     const storage_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const storage_bytes = itemBytes(storage_r.item) orelse return error.InvalidRlp;
-    if (storage_bytes.len != 32) return error.InvalidRlp;
+    const sbytes    = itemBytes(storage_r.item) orelse return error.InvalidRlp;
+    if (sbytes.len != 32) return error.InvalidRlp;
     var storage_root: primitives.Hash = undefined;
-    @memcpy(&storage_root, storage_bytes);
+    @memcpy(&storage_root, sbytes);
     rest = rest[storage_r.consumed..];
 
-    // codeHash (32 bytes)
-    const code_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const code_bytes = itemBytes(code_r.item) orelse return error.InvalidRlp;
-    if (code_bytes.len != 32) return error.InvalidRlp;
+    const code_r  = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const cbytes  = itemBytes(code_r.item) orelse return error.InvalidRlp;
+    if (cbytes.len != 32) return error.InvalidRlp;
     var code_hash: primitives.Hash = undefined;
-    @memcpy(&code_hash, code_bytes);
+    @memcpy(&code_hash, cbytes);
 
     return AccountState{
         .nonce        = nonce,
@@ -192,20 +192,19 @@ pub fn verifyAccount(
 
 // ─── verifyStorage ─────────────────────────────────────────────────────────────
 
-/// Verify a storage slot witness against `storage_root`.
+/// Verify that `slot` is (or isn't) in the storage trie at `storage_root`,
+/// using the flat `pool` of node preimages.
 ///
-/// Returns the decoded slot value as u256, or 0 for a valid non-inclusion
-/// proof (empty storage slot).
+/// Returns the decoded u256 value, or 0 for a valid non-inclusion proof.
 pub fn verifyStorage(
     storage_root: primitives.Hash,
-    witness:      input.StorageWitness,
+    slot:         primitives.Hash,
+    pool:         []const []const u8,
 ) MptError!u256 {
-    const key_hash = keccak256(&witness.slot);
-    const value_opt = try verifyProof(storage_root, key_hash, witness.proof);
-    const value = value_opt orelse return 0;
+    const key_hash = keccak256(&slot);
+    const value = try verifyProof(storage_root, key_hash, pool) orelse return 0;
 
-    // Storage values are RLP-encoded big-endian integers (0–32 bytes).
-    const r = rlp.decodeItem(value) catch return error.InvalidRlp;
+    const r     = rlp.decodeItem(value) catch return error.InvalidRlp;
     const bytes = itemBytes(r.item) orelse return error.InvalidRlp;
     if (bytes.len > 32) return error.InvalidRlp;
     return decodeUint256(bytes) catch return error.InvalidRlp;
@@ -213,38 +212,36 @@ pub fn verifyStorage(
 
 // ─── verifyWitness ─────────────────────────────────────────────────────────────
 
-/// Verify all proofs in the witness, returning the proven pre-state root.
+/// Verify all account and storage proofs in the witness.
+/// Returns the proven pre-state root (== witness.state_root).
 ///
-/// For each StorageWitness, the matching account's storage_root is obtained
-/// by verifying the account proof first.
+/// Keys with length 20 are account addresses.
+/// Keys with length 52 are address (20) + storage slot (32).
 pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
-    for (witness.accounts) |acc| {
-        _ = try verifyAccount(witness.state_root, acc);
-    }
-    for (witness.storage) |slot| {
-        // Find the matching account to obtain its storage root.
-        var found_storage_root: ?primitives.Hash = null;
-        for (witness.accounts) |acc| {
-            if (std.mem.eql(u8, &acc.address, &slot.address)) {
-                const maybe_state = try verifyAccount(witness.state_root, acc);
-                if (maybe_state) |state| {
-                    found_storage_root = state.storage_root;
-                } else {
-                    // Account absent → storage must also be absent (empty trie).
-                    found_storage_root = EMPTY_TRIE_HASH;
-                }
-                break;
-            }
+    for (witness.keys) |key| {
+        if (key.len == 20) {
+            var addr: primitives.Address = undefined;
+            @memcpy(&addr, key[0..20]);
+            _ = try verifyAccount(witness.state_root, addr, witness.nodes);
+
+        } else if (key.len == 52) {
+            var addr: primitives.Address = undefined;
+            @memcpy(&addr, key[0..20]);
+            var raw_slot: primitives.Hash = undefined;
+            @memcpy(&raw_slot, key[20..52]);
+
+            // Must verify the account first to get its storage_root.
+            const account_state = try verifyAccount(witness.state_root, addr, witness.nodes);
+            const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
+            _ = try verifyStorage(storage_root, raw_slot, witness.nodes);
         }
-        const storage_root = found_storage_root orelse return error.InvalidProof;
-        _ = try verifyStorage(storage_root, slot);
+        // Keys of other lengths are silently skipped (future witness formats).
     }
     return witness.state_root;
 }
 
 // ─── Private helpers ───────────────────────────────────────────────────────────
 
-/// keccak256 of RLP-encoded empty string — the Ethereum empty trie root.
 const EMPTY_TRIE_HASH: primitives.Hash = .{
     0x56, 0xe8, 0x1f, 0x17, 0x1b, 0xcc, 0x55, 0xa6,
     0xff, 0x83, 0x45, 0xe6, 0x92, 0xc0, 0xf8, 0x6e,
@@ -252,15 +249,10 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
     0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 };
 
-/// Extract the bytes slice from a bytes-variant RlpItem, or null for list.
 fn itemBytes(item: rlp.RlpItem) ?[]const u8 {
-    return switch (item) {
-        .bytes => |b| b,
-        .list  => null,
-    };
+    return switch (item) { .bytes => |b| b, .list => null };
 }
 
-/// Decode a big-endian unsigned integer from 0–8 bytes (strips leading zeros).
 fn decodeUint64(bytes: []const u8) error{InvalidRlp}!u64 {
     if (bytes.len == 0) return 0;
     if (bytes.len > 8)  return error.InvalidRlp;
@@ -269,7 +261,6 @@ fn decodeUint64(bytes: []const u8) error{InvalidRlp}!u64 {
     return result;
 }
 
-/// Decode a big-endian unsigned integer from 0–32 bytes (strips leading zeros).
 fn decodeUint256(bytes: []const u8) error{InvalidRlp}!u256 {
     if (bytes.len == 0)  return 0;
     if (bytes.len > 32) return error.InvalidRlp;

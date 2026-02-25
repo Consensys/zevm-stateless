@@ -1,8 +1,9 @@
 //! Integration tests for WitnessDatabase.
 //!
 //! Proof vectors are built synthetically using the same RLP construction
-//! helpers as the MPT tests.  Each test wires up a minimal state witness,
-//! initialises a WitnessDatabase and then exercises one interface method.
+//! helpers as the MPT tests.  Each test wires up a minimal StateWitness
+//! (flat node pool), initialises a WitnessDatabase and then exercises one
+//! interface method.
 
 const std       = @import("std");
 const primitives = @import("primitives");
@@ -107,7 +108,7 @@ fn buildEmptyBranchNode(buf: []u8) usize {
     buf[0] = 0xd1; @memset(buf[1..18], 0x80); return 18;
 }
 
-// ─── Test 1: basic — account found in witness ──────────────────────────────────
+// ─── Test 1: basic — account found in pool ────────────────────────────────────
 
 test "basic returns verified AccountInfo" {
     var address: primitives.Address = @splat(0x00);
@@ -122,11 +123,12 @@ test "basic returns verified AccountInfo" {
     const leaf_bytes = leaf_node[0..leaf_len];
     const state_root = mpt.keccak256(leaf_bytes);
 
-    const proof = &[_][]const u8{leaf_bytes};
     const w = input.StateWitness{
         .state_root = state_root,
-        .accounts   = &[_]input.AccountWitness{.{ .address = address, .proof = proof }},
-        .storage    = &.{},
+        .nodes      = &[_][]const u8{leaf_bytes},
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const info = try wdb.basic(address);
@@ -136,45 +138,54 @@ test "basic returns verified AccountInfo" {
     try std.testing.expectEqualSlices(u8, &KECCAK_EMPTY, &info.?.code_hash);
 }
 
-// ─── Test 2: basic — address absent from witness ──────────────────────────────
+// ─── Test 2: basic — non-inclusion via empty branch root ──────────────────────
 
-test "basic returns null for address not in witness" {
-    // Witness covers address 0x..01 only; query 0x..02.
-    var addr1: primitives.Address = @splat(0x00); addr1[19] = 0x01;
-    var addr2: primitives.Address = @splat(0x00); addr2[19] = 0x02;
-
-    var branch: [18]u8 = undefined;
-    const branch_len = buildEmptyBranchNode(&branch);
-    const state_root = mpt.keccak256(branch[0..branch_len]);
-
-    const proof = &[_][]const u8{branch[0..branch_len]};
-    const w = input.StateWitness{
-        .state_root = state_root,
-        .accounts   = &[_]input.AccountWitness{.{ .address = addr1, .proof = proof }},
-        .storage    = &.{},
-    };
-    var wdb = db_mod.WitnessDatabase.init(w);
-    const info = try wdb.basic(addr2);
-    try std.testing.expect(info == null);
-}
-
-// ─── Test 3: basic — non-inclusion proof returns null ─────────────────────────
-
-test "basic returns null for valid non-inclusion proof" {
-    var address: primitives.Address = @splat(0x00); address[19] = 0x33;
+test "basic returns null for valid non-inclusion proof (empty trie)" {
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x22;
 
     var branch: [18]u8 = undefined;
     const branch_len = buildEmptyBranchNode(&branch);
     const state_root = mpt.keccak256(branch[0..branch_len]);
 
-    const proof = &[_][]const u8{branch[0..branch_len]};
     const w = input.StateWitness{
         .state_root = state_root,
-        .accounts   = &[_]input.AccountWitness{.{ .address = address, .proof = proof }},
-        .storage    = &.{},
+        .nodes      = &[_][]const u8{branch[0..branch_len]},
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const info = try wdb.basic(address);
+    try std.testing.expect(info == null);
+}
+
+// ─── Test 3: basic — non-inclusion via leaf suffix mismatch ───────────────────
+//
+// The trie contains addr1; we query addr2.  verifyProof decodes the leaf,
+// finds the suffix does not match addr2's key nibbles, and returns null.
+
+test "basic returns null when queried address differs from trie leaf" {
+    var addr1: primitives.Address = @splat(0x00); addr1[19] = 0x01;
+    var addr2: primitives.Address = @splat(0x00); addr2[19] = 0x02;
+
+    const key_hash1 = mpt.keccak256(&addr1);
+    var account_rlp: [200]u8 = undefined;
+    const account_len = buildAccountRlp(&account_rlp, 1, 0, EMPTY_TRIE_HASH, KECCAK_EMPTY);
+    var leaf_node: [512]u8 = undefined;
+    const leaf_len = buildLeafNode(&leaf_node, key_hash1, account_rlp[0..account_len]);
+    const leaf_bytes = leaf_node[0..leaf_len];
+    const state_root = mpt.keccak256(leaf_bytes);
+
+    const w = input.StateWitness{
+        .state_root = state_root,
+        .nodes      = &[_][]const u8{leaf_bytes},
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
+    };
+    var wdb = db_mod.WitnessDatabase.init(w);
+    const info = try wdb.basic(addr2);
     try std.testing.expect(info == null);
 }
 
@@ -183,90 +194,83 @@ test "basic returns null for valid non-inclusion proof" {
 test "codeByHash(KECCAK_EMPTY) returns empty Bytecode" {
     const w = input.StateWitness{
         .state_root = [_]u8{0} ** 32,
-        .accounts   = &.{},
-        .storage    = &.{},
+        .nodes      = &.{},
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const code = try wdb.codeByHash(KECCAK_EMPTY);
     try std.testing.expect(code.isEmpty());
 }
 
-// ─── Test 5: codeByHash — contract code found via keccak256 match ─────────────
+// ─── Test 5: codeByHash — contract code found in witness.codes ────────────────
 
-test "codeByHash returns contract bytecode from witness" {
+test "codeByHash returns contract bytecode from witness.codes" {
     const contract_code = &[_]u8{ 0x60, 0x00, 0x56 }; // PUSH1 0x00 JUMP
     const code_hash = mpt.keccak256(contract_code);
 
-    var address: primitives.Address = @splat(0x00); address[19] = 0x44;
-    const key_hash = mpt.keccak256(&address);
-
-    var account_rlp: [200]u8 = undefined;
-    const account_len = buildAccountRlp(&account_rlp, 1, 0, EMPTY_TRIE_HASH, code_hash);
-
-    var leaf_node: [512]u8 = undefined;
-    const leaf_len = buildLeafNode(&leaf_node, key_hash, account_rlp[0..account_len]);
-    const leaf_bytes = leaf_node[0..leaf_len];
-    const state_root = mpt.keccak256(leaf_bytes);
-
-    const proof = &[_][]const u8{leaf_bytes};
     const w = input.StateWitness{
-        .state_root = state_root,
-        .accounts   = &[_]input.AccountWitness{.{
-            .address = address,
-            .proof   = proof,
-            .code    = contract_code,
-        }},
-        .storage = &.{},
+        .state_root = [_]u8{0} ** 32,
+        .nodes      = &.{},
+        .codes      = &[_][]const u8{contract_code},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const code = try wdb.codeByHash(code_hash);
     try std.testing.expect(!code.isEmpty());
-    // The raw bytes should match what we passed in.
     try std.testing.expectEqualSlices(u8, contract_code, code.bytecode());
 }
 
-// ─── Test 6: storage — slot value found in witness ────────────────────────────
+// ─── Test 6: storage — slot value found (flat pool) ───────────────────────────
+//
+// Both the account leaf and the storage leaf go into the same flat node pool.
+// WitnessDatabase.storage() resolves the account trie then the storage trie
+// using the same pool for both traversals.
 
 test "storage returns verified slot value" {
-    // Build a single-account state trie whose storage root is a 1-leaf storage trie.
     var address: primitives.Address = @splat(0x00); address[19] = 0x55;
     const slot_key: u256 = 3;
 
-    // Storage proof: leaf for slot 3 with value 0xabcd.
+    // Storage leaf: slot 3 → 0xabcd.
     var slot_hash: primitives.Hash = @splat(0);
-    var n = slot_key; var si: usize = 32;
-    while (si > 0) { si -= 1; slot_hash[si] = @intCast(n & 0xff); n >>= 8; }
+    { var n = slot_key; var si: usize = 32; while (si > 0) { si -= 1; slot_hash[si] = @intCast(n & 0xff); n >>= 8; } }
     const storage_key_hash = mpt.keccak256(&slot_hash);
-
-    const rlp_value = &[_]u8{ 0x82, 0xab, 0xcd }; // RLP of 0xabcd
+    const rlp_value = &[_]u8{ 0x82, 0xab, 0xcd };
     var storage_leaf: [256]u8 = undefined;
     const storage_leaf_len = buildLeafNode(&storage_leaf, storage_key_hash, rlp_value);
-    const storage_root = mpt.keccak256(storage_leaf[0..storage_leaf_len]);
+    const storage_leaf_bytes = storage_leaf[0..storage_leaf_len];
+    const storage_root = mpt.keccak256(storage_leaf_bytes);
 
-    // Account proof: leaf whose account has the computed storage_root.
+    // Account leaf: account with storage_root above.
     const acc_key_hash = mpt.keccak256(&address);
     var account_rlp: [200]u8 = undefined;
     const account_len = buildAccountRlp(&account_rlp, 0, 0, storage_root, KECCAK_EMPTY);
     var acc_leaf: [512]u8 = undefined;
     const acc_leaf_len = buildLeafNode(&acc_leaf, acc_key_hash, account_rlp[0..account_len]);
-    const state_root = mpt.keccak256(acc_leaf[0..acc_leaf_len]);
+    const acc_leaf_bytes = acc_leaf[0..acc_leaf_len];
+    const state_root = mpt.keccak256(acc_leaf_bytes);
 
-    const acc_proof = &[_][]const u8{acc_leaf[0..acc_leaf_len]};
-    const stor_proof = &[_][]const u8{storage_leaf[0..storage_leaf_len]};
-
+    // Flat pool contains both leaves.
     const w = input.StateWitness{
         .state_root = state_root,
-        .accounts   = &[_]input.AccountWitness{.{ .address = address, .proof = acc_proof }},
-        .storage    = &[_]input.StorageWitness{.{ .address = address, .slot = slot_hash, .proof = stor_proof }},
+        .nodes      = &[_][]const u8{ acc_leaf_bytes, storage_leaf_bytes },
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const value = try wdb.storage(address, slot_key);
     try std.testing.expectEqual(@as(u256, 0xabcd), value);
 }
 
-// ─── Test 7: storage — slot absent from witness returns 0 ─────────────────────
+// ─── Test 7: storage — EMPTY_TRIE_HASH storage root returns 0 ─────────────────
+//
+// When an account's storage root is the well-known empty trie hash,
+// verifyProof short-circuits to null without requiring any pool nodes.
 
-test "storage returns 0 for slot not in witness" {
+test "storage returns 0 for account with empty storage trie" {
     var address: primitives.Address = @splat(0x00); address[19] = 0x66;
     const key_hash = mpt.keccak256(&address);
 
@@ -274,13 +278,16 @@ test "storage returns 0 for slot not in witness" {
     const account_len = buildAccountRlp(&account_rlp, 0, 0, EMPTY_TRIE_HASH, KECCAK_EMPTY);
     var leaf_node: [512]u8 = undefined;
     const leaf_len = buildLeafNode(&leaf_node, key_hash, account_rlp[0..account_len]);
-    const state_root = mpt.keccak256(leaf_node[0..leaf_len]);
+    const leaf_bytes = leaf_node[0..leaf_len];
+    const state_root = mpt.keccak256(leaf_bytes);
 
-    const proof = &[_][]const u8{leaf_node[0..leaf_len]};
+    // Pool contains only the account leaf; no storage nodes needed.
     const w = input.StateWitness{
         .state_root = state_root,
-        .accounts   = &[_]input.AccountWitness{.{ .address = address, .proof = proof }},
-        .storage    = &.{}, // no storage witnesses
+        .nodes      = &[_][]const u8{leaf_bytes},
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const value = try wdb.storage(address, 42);
@@ -292,8 +299,10 @@ test "storage returns 0 for slot not in witness" {
 test "blockHash returns zero hash (Phase 3 placeholder)" {
     const w = input.StateWitness{
         .state_root = [_]u8{0} ** 32,
-        .accounts   = &.{},
-        .storage    = &.{},
+        .nodes      = &.{},
+        .codes      = &.{},
+        .keys       = &.{},
+        .headers    = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const hash = try wdb.blockHash(12345678);
