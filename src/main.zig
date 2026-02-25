@@ -1,8 +1,8 @@
 const std = @import("std");
 const io = @import("io.zig");
-const input = @import("input.zig");
-const executor = @import("executor/main.zig");
-const output = @import("output.zig");
+const input = @import("input");
+const executor = @import("executor");
+const output = @import("output");
 
 pub fn main() !void {
     // 1. Read the StatelessInput from the zkVM input channel

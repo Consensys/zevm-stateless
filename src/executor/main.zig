@@ -7,10 +7,10 @@
 //!   4. Compute the post-state root and receipts root.
 //!   5. Return a ProofOutput for the guest to commit.
 
-const input = @import("../input.zig");
-const output = @import("../output.zig");
-const db = @import("../db/main.zig");
-const mpt = @import("../mpt/main.zig");
+const input = @import("input");
+const output = @import("output");
+const db = @import("db");
+const mpt = @import("mpt");
 
 pub fn executeBlock(stateless_input: input.StatelessInput) !output.ProofOutput {
     // 1. Verify witness proofs and obtain the pre-state root

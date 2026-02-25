@@ -37,6 +37,13 @@ pub fn build(b: *std.Build) void {
     });
     input_mod.addImport("primitives", primitives);
 
+    const output_mod = b.addModule("output", .{
+        .root_source_file = b.path("src/output.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    output_mod.addImport("primitives", primitives);
+
     const mpt_mod = b.addModule("mpt", .{
         .root_source_file = b.path("src/mpt/main.zig"),
         .target = target,
@@ -50,6 +57,11 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    db_mod.addImport("primitives", primitives);
+    db_mod.addImport("state", state);
+    db_mod.addImport("bytecode", bytecode);
+    db_mod.addImport("mpt", mpt_mod);
+    db_mod.addImport("input", input_mod);
 
     const executor_mod = b.addModule("executor", .{
         .root_source_file = b.path("src/executor/main.zig"),
@@ -59,12 +71,18 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("primitives", primitives);
     executor_mod.addImport("context", context);
     executor_mod.addImport("handler", handler);
+    executor_mod.addImport("mpt", mpt_mod);
+    executor_mod.addImport("db", db_mod);
+    executor_mod.addImport("input", input_mod);
+    executor_mod.addImport("output", output_mod);
 
     const mod = b.addModule("zevm_stateless", .{
         .root_source_file = b.path("src/root.zig"),
         .target = target,
     });
     mod.addImport("primitives", primitives);
+    mod.addImport("input", input_mod);
+    mod.addImport("output", output_mod);
     mod.addImport("mpt", mpt_mod);
     mod.addImport("db", db_mod);
     mod.addImport("executor", executor_mod);
@@ -90,6 +108,8 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("precompile", precompile);
     exe.root_module.addImport("handler", handler);
     exe.root_module.addImport("inspector", inspector);
+    exe.root_module.addImport("input", input_mod);
+    exe.root_module.addImport("output", output_mod);
     exe.root_module.addImport("mpt", mpt_mod);
     exe.root_module.addImport("db", db_mod);
     exe.root_module.addImport("executor", executor_mod);
@@ -119,8 +139,24 @@ pub fn build(b: *std.Build) void {
     const mpt_tests = b.addTest(.{ .root_module = mpt_test_mod });
     const run_mpt_tests = b.addRunArtifact(mpt_tests);
 
+    // WitnessDatabase integration tests in src/db/test.zig
+    const db_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/db/test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    db_test_mod.addImport("primitives", primitives);
+    db_test_mod.addImport("state", state);
+    db_test_mod.addImport("bytecode", bytecode);
+    db_test_mod.addImport("mpt", mpt_mod);
+    db_test_mod.addImport("input", input_mod);
+    db_test_mod.addImport("db", db_mod);
+    const db_tests = b.addTest(.{ .root_module = db_test_mod });
+    const run_db_tests = b.addRunArtifact(db_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_mpt_tests.step);
+    test_step.dependOn(&run_db_tests.step);
 }

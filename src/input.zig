@@ -12,6 +12,9 @@ pub const AccountWitness = struct {
     address: primitives.Address,
     /// RLP-encoded MPT proof nodes, from root to leaf.
     proof: []const []const u8,
+    /// Raw contract bytecode.  Empty slice for EOAs.
+    /// Must satisfy keccak256(code) == account.code_hash when non-empty.
+    code: []const u8 = &.{},
 };
 
 /// A storage slot witness: proves the value of a single storage slot.
