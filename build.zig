@@ -30,12 +30,20 @@ pub fn build(b: *std.Build) void {
     precompile.addImport("build_options", lib_options_module);
 
     // Local modules
+    const input_mod = b.addModule("input", .{
+        .root_source_file = b.path("src/input.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    input_mod.addImport("primitives", primitives);
+
     const mpt_mod = b.addModule("mpt", .{
         .root_source_file = b.path("src/mpt/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     mpt_mod.addImport("primitives", primitives);
+    mpt_mod.addImport("input", input_mod);
 
     const db_mod = b.addModule("db", .{
         .root_source_file = b.path("src/db/main.zig"),
@@ -98,7 +106,21 @@ pub fn build(b: *std.Build) void {
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
     const run_exe_tests = b.addRunArtifact(exe_tests);
+
+    // MPT integration tests in src/mpt/test.zig
+    const mpt_test_mod = b.createModule(.{
+        .root_source_file = b.path("src/mpt/test.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mpt_test_mod.addImport("primitives", primitives);
+    mpt_test_mod.addImport("mpt", mpt_mod);
+    mpt_test_mod.addImport("input", input_mod);
+    const mpt_tests = b.addTest(.{ .root_module = mpt_test_mod });
+    const run_mpt_tests = b.addRunArtifact(mpt_tests);
+
     const test_step = b.step("test", "Run tests");
     test_step.dependOn(&run_mod_tests.step);
     test_step.dependOn(&run_exe_tests.step);
+    test_step.dependOn(&run_mpt_tests.step);
 }
