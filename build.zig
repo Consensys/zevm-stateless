@@ -122,6 +122,15 @@ pub fn build(b: *std.Build) void {
     run_step.dependOn(&run_cmd.step);
     if (b.args) |args| run_cmd.addArgs(args);
 
+    const run_test_block_step = b.step("run-test-block", "Run against test/vectors/test_block*.json");
+    const run_test_block_cmd = b.addRunArtifact(exe);
+    run_test_block_cmd.step.dependOn(b.getInstallStep());
+    run_test_block_cmd.addArgs(&.{
+        "test/vectors/test_block.json",
+        "test/vectors/test_block_witness.json",
+    });
+    run_test_block_step.dependOn(&run_test_block_cmd.step);
+
     // gen_example: generate examples/block.json and examples/witness.json
     const gen_example_exe = b.addExecutable(.{
         .name = "gen_example",

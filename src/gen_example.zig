@@ -8,6 +8,9 @@
 //! The account trie is a single leaf node (no branches).  The witness pool
 //! contains that one leaf node.  Running the main binary against these files
 //! exercises the complete Phase 1 + Phase 2 pipeline.
+//!
+//! block.json format: {"block":"0x<rlp_hex>"} — a post-Shanghai block whose
+//! header stateRoot is set to the computed trie root.
 
 const std        = @import("std");
 const primitives = @import("primitives");
@@ -29,8 +32,18 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
     0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 };
 
-// ─── Minimal RLP encoder (same logic as mpt/test.zig) ─────────────────────────
+/// keccak256(rlp([])) — used as the sha3Uncles field for an empty uncle list.
+const SHA3_EMPTY_LIST: primitives.Hash = .{
+    0x1d, 0xcc, 0x4d, 0xe8, 0xde, 0xc7, 0x5d, 0x7a,
+    0xab, 0x85, 0xb5, 0x67, 0xb6, 0xcc, 0xd4, 0x1a,
+    0xd3, 0x12, 0x45, 0x1b, 0x94, 0x8a, 0x74, 0x13,
+    0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4, 0x93, 0x47,
+};
 
+// ─── RLP encoder ───────────────────────────────────────────────────────────────
+
+/// Encode `data` as an RLP byte string, writing into `buf[off..]`.
+/// Handles all lengths up to ~64 KiB (2-byte length prefix).
 fn encBytes(buf: []u8, off: usize, data: []const u8) usize {
     var o = off;
     if (data.len == 0) {
@@ -40,23 +53,46 @@ fn encBytes(buf: []u8, off: usize, data: []const u8) usize {
     } else if (data.len <= 55) {
         buf[o] = @intCast(0x80 + data.len); o += 1;
         @memcpy(buf[o..][0..data.len], data); return o + data.len;
-    } else {
-        std.debug.assert(data.len <= 255);
+    } else if (data.len <= 0xff) {
+        // 1-byte length
         buf[o] = 0xb8; buf[o + 1] = @intCast(data.len); o += 2;
+        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+    } else {
+        // 2-byte length (covers 256–65535 bytes; logsBloom = 256 bytes lands here)
+        buf[o] = 0xb9;
+        buf[o + 1] = @intCast((data.len >> 8) & 0xff);
+        buf[o + 2] = @intCast(data.len & 0xff);
+        o += 3;
         @memcpy(buf[o..][0..data.len], data); return o + data.len;
     }
 }
 
+/// Encode `payload` as an RLP list, writing into `buf[off..]`.
+/// Handles payload lengths up to ~64 KiB (2-byte length prefix).
 fn encList(buf: []u8, off: usize, payload: []const u8) usize {
     var o = off;
     if (payload.len <= 55) {
         buf[o] = @intCast(0xc0 + payload.len); o += 1;
-    } else {
-        std.debug.assert(payload.len <= 255);
+    } else if (payload.len <= 0xff) {
         buf[o] = 0xf8; buf[o + 1] = @intCast(payload.len); o += 2;
+    } else {
+        buf[o] = 0xf9;
+        buf[o + 1] = @intCast((payload.len >> 8) & 0xff);
+        buf[o + 2] = @intCast(payload.len & 0xff);
+        o += 3;
     }
     @memcpy(buf[o..][0..payload.len], payload);
     return o + payload.len;
+}
+
+/// Encode a uint64 as a minimal big-endian RLP integer (no leading zeros).
+fn encUint(buf: []u8, off: usize, val: u64) usize {
+    if (val == 0) { buf[off] = 0x80; return off + 1; }
+    var tmp: [8]u8 = undefined;
+    var v = val;
+    var nb: usize = 0;
+    while (v > 0) : (nb += 1) { tmp[7 - nb] = @intCast(v & 0xff); v >>= 8; }
+    return encBytes(buf, off, tmp[8 - nb ..]);
 }
 
 fn buildAccountRlp(
@@ -92,6 +128,74 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
     return encList(buf, 0, payload[0..pl]);
 }
 
+/// Build a minimal but structurally valid post-Shanghai Ethereum block whose
+/// header stateRoot is set to `state_root`.  All other fields use zero or
+/// well-known empty values.  Returns the number of bytes written to `buf`.
+///
+/// Block = RLP([header, transactions, uncles, withdrawals])
+///
+/// Header fields used:
+///   0  parentHash:       [0; 32]
+///   1  sha3Uncles:       SHA3_EMPTY_LIST
+///   2  coinbase:         [0; 20]
+///   3  stateRoot:        state_root          ← proof anchor
+///   4  transactionsRoot: EMPTY_TRIE_HASH
+///   5  receiptsRoot:     EMPTY_TRIE_HASH
+///   6  logsBloom:        [0; 256]
+///   7  difficulty:       0 (PoS)
+///   8  number:           1
+///   9  gasLimit:         30_000_000
+///  10  gasUsed:          0
+///  11  timestamp:        1
+///  12  extraData:        []
+///  13  mixHash:          [0; 32]  (prevRandao)
+///  14  nonce:            [0; 8]   (PoS fixed)
+///  15  baseFeePerGas:    7
+///  16  withdrawalsRoot:  EMPTY_TRIE_HASH
+fn buildBlockRlp(buf: []u8, state_root: primitives.Hash) usize {
+    const zero32:  [32]u8  = @splat(0x00);
+    const zero20:  [20]u8  = @splat(0x00);
+    const zero8:   [8]u8   = @splat(0x00);
+    const zero256: [256]u8 = @splat(0x00);
+
+    // ── Build header payload ─────────────────────────────────────────────────
+    var hdr_payload: [700]u8 = undefined;
+    var hp: usize = 0;
+
+    hp = encBytes(&hdr_payload, hp, &zero32);          // 0: parentHash
+    hp = encBytes(&hdr_payload, hp, &SHA3_EMPTY_LIST); // 1: sha3Uncles
+    hp = encBytes(&hdr_payload, hp, &zero20);          // 2: coinbase
+    hp = encBytes(&hdr_payload, hp, &state_root);      // 3: stateRoot
+    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 4: transactionsRoot
+    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 5: receiptsRoot
+    hp = encBytes(&hdr_payload, hp, &zero256);         // 6: logsBloom (256 bytes)
+    hdr_payload[hp] = 0x80; hp += 1;                  // 7: difficulty = 0
+    hp = encUint(&hdr_payload, hp, 1);                 // 8: number = 1
+    hp = encUint(&hdr_payload, hp, 30_000_000);        // 9: gasLimit
+    hdr_payload[hp] = 0x80; hp += 1;                  // 10: gasUsed = 0
+    hp = encUint(&hdr_payload, hp, 1);                 // 11: timestamp = 1
+    hdr_payload[hp] = 0x80; hp += 1;                  // 12: extraData = []
+    hp = encBytes(&hdr_payload, hp, &zero32);          // 13: mixHash (prevRandao)
+    hp = encBytes(&hdr_payload, hp, &zero8);           // 14: nonce = 0
+    hp = encUint(&hdr_payload, hp, 7);                 // 15: baseFeePerGas = 7
+    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 16: withdrawalsRoot
+
+    var hdr_buf: [750]u8 = undefined;
+    const hdr_len = encList(&hdr_buf, 0, hdr_payload[0..hp]);
+
+    // ── Build block payload (header + 3 empty body lists) ───────────────────
+    var block_payload: [800]u8 = undefined;
+    var bp: usize = 0;
+
+    @memcpy(block_payload[bp..][0..hdr_len], hdr_buf[0..hdr_len]);
+    bp += hdr_len;
+    block_payload[bp] = 0xc0; bp += 1; // transactions: empty list
+    block_payload[bp] = 0xc0; bp += 1; // uncles: empty list
+    block_payload[bp] = 0xc0; bp += 1; // withdrawals: empty list
+
+    return encList(buf, 0, block_payload[0..bp]);
+}
+
 // ─── main ──────────────────────────────────────────────────────────────────────
 
 pub fn main() !void {
@@ -118,14 +222,15 @@ pub fn main() !void {
     const cwd = std.fs.cwd();
     try cwd.makePath("examples");
 
-    // ── block.json ──────────────────────────────────────────────────────────
+    // ── block.json — full RLP block ──────────────────────────────────────────
+    var block_rlp_buf: [900]u8 = undefined;
+    const block_rlp_len = buildBlockRlp(&block_rlp_buf, state_root);
+    const block_rlp_bytes = block_rlp_buf[0..block_rlp_len];
+
     const block_content = try std.fmt.allocPrint(allocator,
-        \\{{
-        \\  "number": 1,
-        \\  "stateRoot": "0x{x}"
-        \\}}
+        \\{{"block":"0x{x}"}}
         \\
-    , .{state_root});
+    , .{block_rlp_bytes});
     defer allocator.free(block_content);
     try cwd.writeFile(.{ .sub_path = "examples/block.json", .data = block_content });
 
@@ -150,5 +255,6 @@ pub fn main() !void {
     std.debug.print("  nonce:      5\n",     .{});
     std.debug.print("  balance:    1000000000\n", .{});
     std.debug.print("  state root: 0x{x}\n", .{state_root});
+    std.debug.print("  block RLP:  {} bytes\n", .{block_rlp_len});
     std.debug.print("\nRun:  zig build run\n", .{});
 }

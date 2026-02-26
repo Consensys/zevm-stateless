@@ -9,8 +9,8 @@
 #   ./run_proof.sh http://localhost:8545 latest
 #
 # The script calls:
-#   1. eth_getBlockByNumber  — to get stateRoot and block number
-#   2. debug_generateWitness — to get the flat proof witness
+#   1. debug_getRawBlock      — to get the full RLP-encoded block
+#   2. debug_generateWitness  — to get the flat proof witness
 #      (falls back to debug_executionWitness if the first call returns an error)
 # Then runs: zig-out/bin/zevm_stateless <block.json> <witness.json>
 #
@@ -47,26 +47,23 @@ else
     BLOCK_TAG="\"$BLOCK_HEX\""
 fi
 
-# ─── 1. eth_getBlockByNumber ──────────────────────────────────────────────────
+# ─── 1. debug_getRawBlock ─────────────────────────────────────────────────────
 
-echo "Fetching block $BLOCK_HEX from $RPC_URL ..."
+echo "Fetching raw block $BLOCK_HEX from $RPC_URL ..."
 
-BLOCK_RESP=$(rpc_call "eth_getBlockByNumber" "$BLOCK_TAG, false") \
-    || die "eth_getBlockByNumber request failed (curl error)"
+RAW_BLOCK_RESP=$(rpc_call "debug_getRawBlock" "$BLOCK_TAG") \
+    || die "debug_getRawBlock request failed (curl error)"
 
-if echo "$BLOCK_RESP" | jq -e '.error' > /dev/null 2>&1; then
-    MSG=$(echo "$BLOCK_RESP" | jq -r '.error.message // .error')
-    die "eth_getBlockByNumber: $MSG"
+if echo "$RAW_BLOCK_RESP" | jq -e '.error' > /dev/null 2>&1; then
+    MSG=$(echo "$RAW_BLOCK_RESP" | jq -r '.error.message // .error')
+    die "debug_getRawBlock: $MSG"
 fi
 
-STATE_ROOT=$(echo "$BLOCK_RESP" | jq -r '.result.stateRoot') \
-    || die "could not parse stateRoot from block response"
+BLOCK_RLP_HEX=$(echo "$RAW_BLOCK_RESP" | jq -r '.result') \
+    || die "could not parse result from debug_getRawBlock response"
 
-BLOCK_NUMBER_HEX=$(echo "$BLOCK_RESP" | jq -r '.result.number')
-BLOCK_NUMBER_DEC=$(printf "%d" "$BLOCK_NUMBER_HEX")
-
-echo "  number:     $BLOCK_NUMBER_DEC  ($BLOCK_NUMBER_HEX)"
-echo "  stateRoot:  $STATE_ROOT"
+BLOCK_RLP_BYTES=$(( (${#BLOCK_RLP_HEX} - 2) / 2 ))
+echo "  raw block:  $BLOCK_RLP_BYTES bytes RLP"
 
 # ─── 2. debug_generateWitness (or debug_executionWitness) ────────────────────
 
@@ -74,14 +71,14 @@ echo ""
 echo "Fetching execution witness ..."
 
 WITNESS_METHOD="debug_generateWitness"
-WITNESS_RESP=$(rpc_call "$WITNESS_METHOD" "\"$BLOCK_NUMBER_HEX\"") \
+WITNESS_RESP=$(rpc_call "$WITNESS_METHOD" "\"$BLOCK_HEX\"") \
     || die "$WITNESS_METHOD request failed (curl error)"
 
 # Fall back to debug_executionWitness if the first method returns an error
 if echo "$WITNESS_RESP" | jq -e '.error' > /dev/null 2>&1; then
     echo "  $WITNESS_METHOD not available, trying debug_executionWitness ..."
     WITNESS_METHOD="debug_executionWitness"
-    WITNESS_RESP=$(rpc_call "$WITNESS_METHOD" "\"$BLOCK_NUMBER_HEX\"") \
+    WITNESS_RESP=$(rpc_call "$WITNESS_METHOD" "\"$BLOCK_HEX\"") \
         || die "$WITNESS_METHOD request failed (curl error)"
 fi
 
@@ -119,8 +116,8 @@ trap 'rm -rf "$TMPDIR"' EXIT
 BLOCK_JSON="$TMPDIR/block.json"
 WITNESS_JSON="$TMPDIR/witness.json"
 
-jq -n --argjson number "$BLOCK_NUMBER_DEC" --arg stateRoot "$STATE_ROOT" \
-    '{"number": $number, "stateRoot": $stateRoot}' > "$BLOCK_JSON"
+# block.json: write the raw JSON-RPC response directly; the verifier reads .result
+echo "$RAW_BLOCK_RESP" > "$BLOCK_JSON"
 
 echo "$WITNESS" > "$WITNESS_JSON"
 
