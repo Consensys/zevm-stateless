@@ -5,6 +5,7 @@ const input      = @import("input");
 const primitives = @import("primitives");
 const mpt        = @import("mpt");
 const db         = @import("db");
+const executor   = @import("executor");
 
 pub fn main() void {
     run() catch |err| {
@@ -44,23 +45,25 @@ fn run() !void {
 
     var wit = io.parseWitnessJson(allocator, witness_json) catch |err| {
         std.debug.print("error: failed to parse {s}: {}\n", .{ witness_path, err });
-        std.debug.print("  expected format: {{\"state\":[...],\"codes\":[...],\"keys\":[...],\"headers\":[...]}}\n", .{});
+        std.debug.print("  accepted formats:\n", .{});
+        std.debug.print("    {{\"state\":[...],\"codes\":[...],\"keys\":[...],\"headers\":[...]}}  direct\n", .{});
+        std.debug.print("    {{\"jsonrpc\":\"2.0\",\"result\":{{...}}}}  JSON-RPC envelope\n", .{});
         std.process.exit(1);
     };
     // Use the parent block's state root as the proof anchor.
-    // The witness proves the PRE-execution state; blk.state_root is the
+    // The witness proves the PRE-execution state; blk.header.state_root is the
     // POST-execution state root and must not be used here.
-    // Fall back to blk.state_root only for synthetic examples that embed
+    // Fall back to blk.header.state_root only for synthetic examples that embed
     // the proof anchor directly in the block header (no witness headers).
-    wit.state_root = io.findPreStateRoot(wit.headers, blk.number) orelse blk.state_root;
+    wit.state_root = io.findPreStateRoot(wit.headers, blk.header.number) orelse blk.header.state_root;
 
     const si = input.StatelessInput{
-        .block_number = blk.number,
-        .transactions = &.{},
+        .header       = blk.header,
+        .transactions = blk.transactions,
         .witness      = wit,
     };
 
-    std.debug.print("=== zevm-stateless: block #{d} ===\n\n", .{si.block_number});
+    std.debug.print("=== zevm-stateless: block #{d} ===\n\n", .{si.header.number});
 
     // ── Phase 1: MPT proof verification ───────────────────────────────────────
     std.debug.print("Phase 1  MPT proof verification\n", .{});
@@ -200,6 +203,34 @@ fn run() !void {
 
     if (account_count == 0) {
         std.debug.print("  (no account keys in witness)\n", .{});
+    }
+
+    // ── Phase 3: Block execution (mocked) ─────────────────────────────────────
+    std.debug.print("\nPhase 3  Block execution\n", .{});
+    {
+        const block_env = executor.blockEnvFromHeader(si.header);
+
+        std.debug.print("  block env\n", .{});
+        std.debug.print("    number      = {d}\n",   .{block_env.number});
+        std.debug.print("    coinbase    = 0x{x}\n", .{block_env.beneficiary});
+        std.debug.print("    timestamp   = {d}\n",   .{block_env.timestamp});
+        std.debug.print("    gas_limit   = {d}\n",   .{block_env.gas_limit});
+        std.debug.print("    basefee     = {d}\n",   .{block_env.basefee});
+        std.debug.print("    prevrandao  = 0x{x}\n", .{block_env.prevrandao orelse [_]u8{0} ** 32});
+        if (block_env.blob_excess_gas_and_price) |b| {
+            std.debug.print("    excess_blob_gas = {d}  blob_gasprice = {d}\n",
+                .{ b.excess_blob_gas, b.blob_gasprice });
+        }
+
+        std.debug.print("  transactions  = {d}\n",   .{si.transactions.len});
+
+        const proof_out = executor.executeBlock(si) catch |err| {
+            std.debug.print("  FAIL → {}\n", .{err});
+            std.process.exit(1);
+        };
+        std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
+        std.debug.print("  post_state_root = 0x{x}  (mock)\n", .{proof_out.post_state_root});
+        std.debug.print("  receipts_root   = 0x{x}  (mock)\n", .{proof_out.receipts_root});
     }
 
     std.debug.print("\nDone.\n", .{});
