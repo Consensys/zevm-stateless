@@ -106,10 +106,11 @@ The script:
 ```
 
 The `block` field is the full RLP-encoded Ethereum block as returned by `debug_getRawBlock`.
-The verifier decodes this RLP to extract the block number (header field 8) and state root
-(header field 3) — the cryptographic trust anchor for all proof verification.
+The verifier decodes this RLP to extract the block number (header field 8). The state root
+used as the proof anchor is **not** taken from here — it is the *pre-execution* (parent
+block) state root found in `witness.json`'s `headers` field.
 
-**`witness.json`** (mirrors [`debug_executionWitness`](https://eips.ethereum.org/EIPS/eip-6800)):
+**`witness.json`**:
 ```json
 {
   "state":   ["0x<hex RLP node>", ...],
@@ -119,6 +120,9 @@ The verifier decodes this RLP to extract the block number (header field 8) and s
 }
 ```
 
+See [`WITNESS.md`](WITNESS.md) for a detailed description of all four fields,
+their trust relationships, and the pre-state vs post-state root distinction.
+
 `state` is a flat pool of RLP-encoded trie node preimages. The verifier locates each node by scanning the pool for an entry whose `keccak256` matches the expected hash — no pre-assembled ordered proof paths are needed.
 
 `keys` uses length to distinguish key types:
@@ -127,7 +131,7 @@ The verifier decodes this RLP to extract the block number (header field 8) and s
 
 ## How proof verification works
 
-Starting from `stateRoot` (the trust anchor from the block header):
+Starting from the pre-state root (the `stateRoot` of the parent block, found in `witness.headers`):
 
 1. **`verifyProof(root, key_hash, pool)`** — traverses the trie by repeatedly calling `findNode(pool, expected_hash)`. At each step it decodes the found node and follows the correct branch/leaf path based on the nibbles of `key_hash`. Inline nodes (< 32 bytes, embedded directly in a parent) bypass the pool lookup. Returns the leaf value bytes on inclusion, `null` on valid non-inclusion.
 

@@ -137,6 +137,95 @@ pub fn verifyProof(
     }
 }
 
+// ─── verifyProofVerbose ────────────────────────────────────────────────────────
+
+/// Like verifyProof but writes a one-line trace per trie node to `writer`.
+///
+/// Each line shows: node type, the hash used to locate it (or "(inline)" for
+/// embedded nodes), and what was consumed — nibble index for branches,
+/// number of skipped nibbles for extensions.
+pub fn verifyProofVerbose(
+    root_hash: primitives.Hash,
+    key_hash:  primitives.Hash,
+    pool:      []const []const u8,
+    writer:    anytype,
+) MptError!?[]const u8 {
+    if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
+
+    var key_nibbles: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&key_hash, &key_nibbles);
+
+    const ExpectedRef = union(enum) {
+        hash:        [32]u8,
+        inline_node: []const u8,
+    };
+    var expected: ExpectedRef = .{ .hash = root_hash };
+    var pos: usize = 0;
+
+    while (true) {
+        const node_rlp: []const u8 = switch (expected) {
+            .hash        => |h|   findNode(pool, h) orelse return error.InvalidProof,
+            .inline_node => |inl| inl,
+        };
+
+        const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
+            error.InvalidRlp  => return error.InvalidRlp,
+            error.InvalidNode => return error.InvalidNode,
+        };
+
+        switch (decoded) {
+            .branch => |b| {
+                if (pos >= 64) return error.InvalidProof;
+                const nibble = key_nibbles[pos];
+                pos += 1;
+                switch (expected) {
+                    .hash        => |h| writer.print("        branch    0x{x}  nibble={x}\n", .{ h, nibble }) catch {},
+                    .inline_node =>     writer.print("        branch    (inline)  nibble={x}\n", .{nibble}) catch {},
+                }
+                switch (b.children[nibble]) {
+                    .empty       => return null,
+                    .hash        => |h|   expected = .{ .hash = h },
+                    .inline_node => |inl| expected = .{ .inline_node = inl },
+                }
+            },
+
+            .extension => |e| {
+                var path_buf: [128]u8 = undefined;
+                const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+                if (hp.is_leaf) return error.InvalidNode;
+                const prefix_nibs = path_buf[0..hp.len];
+                if (pos + prefix_nibs.len > 64) return error.InvalidProof;
+                switch (expected) {
+                    .hash        => |h| writer.print("        extension 0x{x}  skip={d}\n", .{ h, hp.len }) catch {},
+                    .inline_node =>     writer.print("        extension (inline)  skip={d}\n", .{hp.len}) catch {},
+                }
+                if (!std.mem.eql(u8, prefix_nibs, key_nibbles[pos .. pos + prefix_nibs.len]))
+                    return null;
+                pos += prefix_nibs.len;
+                switch (e.child) {
+                    .empty       => return error.InvalidNode,
+                    .hash        => |h|   expected = .{ .hash = h },
+                    .inline_node => |inl| expected = .{ .inline_node = inl },
+                }
+            },
+
+            .leaf => |lf| {
+                var path_buf: [128]u8 = undefined;
+                const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+                if (!hp.is_leaf) return error.InvalidNode;
+                const suffix_nibs = path_buf[0..hp.len];
+                if (suffix_nibs.len != 64 - pos) return null;
+                if (!std.mem.eql(u8, suffix_nibs, key_nibbles[pos..])) return null;
+                switch (expected) {
+                    .hash        => |h| writer.print("        leaf      0x{x}\n", .{h}) catch {},
+                    .inline_node =>     writer.print("        leaf      (inline)\n", .{}) catch {},
+                }
+                return lf.value;
+            },
+        }
+    }
+}
+
 // ─── verifyAccount ─────────────────────────────────────────────────────────────
 
 /// Verify that `address` is (or isn't) in the state trie at `state_root`,
@@ -218,16 +307,22 @@ pub fn verifyStorage(
 ///
 /// Keys with length 20 are account addresses.
 /// Keys with length 52 are address (20) + storage slot (32).
+/// Keys with length 32 are standalone storage slots that belong to the
+/// nearest preceding account address (20-byte key) in the array.
 pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
+    var current_addr: ?primitives.Address = null;
+
     for (witness.keys) |key| {
         if (key.len == 20) {
             var addr: primitives.Address = undefined;
             @memcpy(&addr, key[0..20]);
+            current_addr = addr;
             _ = try verifyAccount(witness.state_root, addr, witness.nodes);
 
         } else if (key.len == 52) {
             var addr: primitives.Address = undefined;
             @memcpy(&addr, key[0..20]);
+            current_addr = addr;
             var raw_slot: primitives.Hash = undefined;
             @memcpy(&raw_slot, key[20..52]);
 
@@ -235,8 +330,18 @@ pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
             const account_state = try verifyAccount(witness.state_root, addr, witness.nodes);
             const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
             _ = try verifyStorage(storage_root, raw_slot, witness.nodes);
+
+        } else if (key.len == 32) {
+            // Standalone slot: context account is the nearest preceding address key.
+            if (current_addr) |addr| {
+                var raw_slot: primitives.Hash = undefined;
+                @memcpy(&raw_slot, key[0..32]);
+
+                const account_state = try verifyAccount(witness.state_root, addr, witness.nodes);
+                const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
+                _ = try verifyStorage(storage_root, raw_slot, witness.nodes);
+            }
         }
-        // Keys of other lengths are silently skipped (future witness formats).
     }
     return witness.state_root;
 }
