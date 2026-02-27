@@ -187,4 +187,77 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_mpt_tests.step);
     test_step.dependOn(&run_db_tests.step);
+
+    // ---------------------------------------------------------------------------
+    // t8n — Ethereum State Transition Tool (execution-spec-tests compatible)
+    //
+    // Implements the geth evm t8n interface:
+    //   t8n --input.alloc A --input.env E --input.txs T --state.fork F \
+    //       --output.alloc out/alloc.json --output.result out/result.json
+    //
+    // Uses the local zevm branch (feat/gap-analysis) for EVM execution.
+    // Links secp256k1 for transaction signing/recovery, OpenSSL for precompiles.
+    // ---------------------------------------------------------------------------
+    const zevm_local_dep = b.dependency("zevm_local", .{
+        .target = target,
+        .optimize = optimize,
+        .blst = false,
+        .mcl = false,
+    });
+
+    const local_primitives = zevm_local_dep.module("primitives");
+    const local_state = zevm_local_dep.module("state");
+    const local_bytecode = zevm_local_dep.module("bytecode");
+    const local_database = zevm_local_dep.module("database");
+    const local_context = zevm_local_dep.module("context");
+    const local_handler = zevm_local_dep.module("handler");
+    const local_precompile = zevm_local_dep.module("precompile");
+
+    const t8n_exe = b.addExecutable(.{
+        .name = "t8n",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/t8n/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives", .module = local_primitives },
+                .{ .name = "state",      .module = local_state      },
+                .{ .name = "bytecode",   .module = local_bytecode   },
+                .{ .name = "database",   .module = local_database   },
+                .{ .name = "context",    .module = local_context    },
+                .{ .name = "handler",    .module = local_handler    },
+                .{ .name = "precompile", .module = local_precompile },
+            },
+        }),
+    });
+    // secp256k1_recovery.h and secp256k1.h are in the Homebrew include path.
+    // OpenSSL headers and libraries are also required by zevm_local's precompile module.
+    t8n_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    t8n_exe.linkSystemLibrary("secp256k1");
+    t8n_exe.linkSystemLibrary("ssl");
+    t8n_exe.linkSystemLibrary("crypto");
+    t8n_exe.linkSystemLibrary("c");
+    t8n_exe.linkSystemLibrary("m");
+
+    b.installArtifact(t8n_exe);
+
+    // zig build t8n [-- --input.alloc ... --state.fork Cancun ...]
+    const run_t8n_step = b.step("t8n", "Run the t8n state transition tool");
+    const run_t8n_cmd = b.addRunArtifact(t8n_exe);
+    run_t8n_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_t8n_cmd.addArgs(args);
+    run_t8n_step.dependOn(&run_t8n_cmd.step);
+
+    // zig build fetch-fixtures — download execution-spec-tests v5.4.0 stable fixtures
+    const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests fixtures");
+    const fetch_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        "mkdir -p test/fixtures && " ++
+        "echo 'Downloading execution-spec-tests v5.4.0 fixtures...' && " ++
+        "curl -L --progress-bar " ++
+        "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_stable.tar.gz " ++
+        "| tar xz -C test/fixtures/ && " ++
+        "echo 'Done. Fixtures extracted to test/fixtures/'",
+    });
+    fetch_fixtures_step.dependOn(&fetch_cmd.step);
 }

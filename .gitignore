@@ -14,6 +14,9 @@ zig-cache/
 # zisk build tree
 /zisk/
 
+# execution-spec-tests downloaded fixtures (use `zig build fetch-fixtures`)
+test/fixtures/
+
 # OS
 .DS_Store
 Thumbs.db

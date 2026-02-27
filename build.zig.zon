@@ -32,9 +32,14 @@
     // Once all dependencies are fetched, `zig build` no longer requires
     // internet connectivity.
     .dependencies = .{
+        // Published v0.3.1 — used by the main zevm_stateless binary (crypto-lib-free, zkVM-compatible)
         .zevm = .{
             .url = "https://github.com/10d9e/zevm/archive/refs/tags/v0.3.1.tar.gz",
             .hash = "1220d4302698eb1a804aedfbb398c3e100f0c5fe730d06bc85c101792f86fa55cb0c",
+        },
+        // Local feat/gap-analysis branch — used only by state_test_runner (links system libs)
+        .zevm_local = .{
+            .path = "../zevm",
         },
     },
     // Specifies the set of files and directories that are included in this package.
