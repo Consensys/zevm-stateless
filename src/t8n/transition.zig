@@ -66,6 +66,9 @@ pub const TransitionResult = struct {
     current_base_fee: ?u64,
     excess_blob_gas: ?u64,
     blob_gas_used: u64,
+    // Original txs (used for txRoot computation)
+    txs: []input.TxInput,
+    chain_id: u64,
 };
 
 // ─── Dummy block hash ─────────────────────────────────────────────────────────
@@ -728,6 +731,8 @@ pub fn transition(
         .current_base_fee = env.base_fee,
         .excess_blob_gas = env.excess_blob_gas,
         .blob_gas_used = total_blob_gas,
+        .txs = txs,
+        .chain_id = chain_id,
     };
 }
 
@@ -808,6 +813,12 @@ fn extractPostState(
             } else {
                 try acct.storage.put(arena, key, present);
             }
+        }
+
+        // EIP-161: remove empty accounts (nonce=0, balance=0, no code, no storage)
+        if (acct.nonce == 0 and acct.balance == 0 and acct.code.len == 0 and acct.storage.count() == 0) {
+            _ = post.remove(addr);
+            continue;
         }
 
         try post.put(arena, addr, acct);

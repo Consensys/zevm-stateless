@@ -126,8 +126,8 @@ pub fn build(b: *std.Build) void {
     const run_test_block_cmd = b.addRunArtifact(exe);
     run_test_block_cmd.step.dependOn(b.getInstallStep());
     run_test_block_cmd.addArgs(&.{
-        "test/vectors/test_block.json",
-        "test/vectors/test_block_witness.json",
+        "test/vectors/stateless/test_block.json",
+        "test/vectors/stateless/test_block_witness.json",
     });
     run_test_block_step.dependOn(&run_test_block_cmd.step);
 
@@ -213,6 +213,13 @@ pub fn build(b: *std.Build) void {
     const local_handler = zevm_local_dep.module("handler");
     const local_precompile = zevm_local_dep.module("precompile");
 
+    // mpt_builder: standalone trie builder (no external deps)
+    const mpt_builder_mod = b.addModule("mpt_builder", .{
+        .root_source_file = b.path("src/mpt/builder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const t8n_exe = b.addExecutable(.{
         .name = "t8n",
         .root_module = b.createModule(.{
@@ -220,13 +227,14 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives", .module = local_primitives },
-                .{ .name = "state",      .module = local_state      },
-                .{ .name = "bytecode",   .module = local_bytecode   },
-                .{ .name = "database",   .module = local_database   },
-                .{ .name = "context",    .module = local_context    },
-                .{ .name = "handler",    .module = local_handler    },
-                .{ .name = "precompile", .module = local_precompile },
+                .{ .name = "primitives",  .module = local_primitives  },
+                .{ .name = "state",       .module = local_state       },
+                .{ .name = "bytecode",    .module = local_bytecode    },
+                .{ .name = "database",    .module = local_database    },
+                .{ .name = "context",     .module = local_context     },
+                .{ .name = "handler",     .module = local_handler     },
+                .{ .name = "precompile",  .module = local_precompile  },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
             },
         }),
     });
