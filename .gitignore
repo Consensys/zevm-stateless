@@ -20,3 +20,4 @@ test/fixtures/
 # OS
 .DS_Store
 Thumbs.db
+spec-tests/

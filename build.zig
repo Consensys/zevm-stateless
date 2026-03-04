@@ -256,16 +256,60 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_t8n_cmd.addArgs(args);
     run_t8n_step.dependOn(&run_t8n_cmd.step);
 
-    // zig build fetch-fixtures — download execution-spec-tests v5.4.0 stable fixtures
+    // ---------------------------------------------------------------------------
+    // spec-test-runner — Native Zig runner for execution-spec-tests state fixtures
+    //
+    // Reads fixture JSONs from test/fixtures/fixtures/state_tests, builds TxInput
+    // from indexed transaction fields + transaction.sender (no ECDSA), calls
+    // transition() directly, and compares stateRoot + logsHash to expected values.
+    //
+    // Usage: zig build spec-tests [-- --fork Cancun --file path/to/fixture.json -x]
+    // Fixtures dir: spec-tests/fixtures/state_tests (download with: zig build fetch-fixtures)
+    // ---------------------------------------------------------------------------
+    const spec_test_exe = b.addExecutable(.{
+        .name = "spec-test-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/spec_test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",  .module = local_primitives  },
+                .{ .name = "state",       .module = local_state       },
+                .{ .name = "bytecode",    .module = local_bytecode    },
+                .{ .name = "database",    .module = local_database    },
+                .{ .name = "context",     .module = local_context     },
+                .{ .name = "handler",     .module = local_handler     },
+                .{ .name = "precompile",  .module = local_precompile  },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+            },
+        }),
+    });
+    spec_test_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    spec_test_exe.linkSystemLibrary("secp256k1");
+    spec_test_exe.linkSystemLibrary("ssl");
+    spec_test_exe.linkSystemLibrary("crypto");
+    spec_test_exe.linkSystemLibrary("c");
+    spec_test_exe.linkSystemLibrary("m");
+
+    b.installArtifact(spec_test_exe);
+
+    const run_spec_tests_step = b.step("spec-tests", "Run execution-spec-tests state fixtures");
+    const run_spec_tests_cmd = b.addRunArtifact(spec_test_exe);
+    run_spec_tests_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_spec_tests_cmd.addArgs(args);
+    run_spec_tests_step.dependOn(&run_spec_tests_cmd.step);
+
+    // zig build fetch-fixtures — download execution-spec-tests v5.4.0 develop fixtures
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests fixtures");
     const fetch_cmd = b.addSystemCommand(&.{
         "sh", "-c",
-        "mkdir -p test/fixtures && " ++
+        "rm -rf spec-tests/fixtures && " ++
+        "mkdir -p spec-tests/fixtures && " ++
         "echo 'Downloading execution-spec-tests v5.4.0 fixtures...' && " ++
-        "curl -L --progress-bar " ++
-        "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_stable.tar.gz " ++
-        "| tar xz -C test/fixtures/ && " ++
-        "echo 'Done. Fixtures extracted to test/fixtures/'",
+        "curl -fL " ++
+        "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz " ++
+        "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
+        "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     });
     fetch_fixtures_step.dependOn(&fetch_cmd.step);
 }

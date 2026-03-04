@@ -1,0 +1,492 @@
+/// Spec-test runner: execute execution-spec-tests state fixtures and compare
+/// stateRoot / logsHash against expected values.
+///
+/// Fixture format (execution-spec-tests):
+///   { "test_name": { "pre": {...}, "env": {...}, "transaction": {...}, "post": { "Fork": [{...}] } } }
+///
+/// For each post[fork][i]:
+///   - indexes.{data, gas, value} select from transaction.{data[], gasLimit[], value[]}
+///   - transaction.sender is used directly as the caller (no ECDSA needed)
+///   - We call transition() and compare computed stateRoot + logsHash to expected hash / logs
+const std = @import("std");
+
+const input_mod = @import("../t8n/input.zig");
+const transition_mod = @import("../t8n/transition.zig");
+const output_mod = @import("../t8n/output.zig");
+
+// ─── Public stats ─────────────────────────────────────────────────────────────
+
+pub const RunStats = struct {
+    passed: u64 = 0,
+    failed: u64 = 0,
+    skipped: u64 = 0,
+
+    pub fn total(self: RunStats) u64 {
+        return self.passed + self.failed;
+    }
+};
+
+// ─── Hex helpers (self-contained — mirrors private helpers in input.zig) ──────
+
+fn stripHex(s: []const u8) []const u8 {
+    if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) return s[2..];
+    return s;
+}
+
+fn hexToAddr(hex: []const u8) !input_mod.Address {
+    const src = stripHex(hex);
+    var addr: input_mod.Address = [_]u8{0} ** 20;
+    if (src.len == 0) return addr;
+    if (src.len > 40) return error.InvalidAddress;
+    var padded: [40]u8 = [_]u8{'0'} ** 40;
+    @memcpy(padded[40 - src.len ..], src);
+    _ = try std.fmt.hexToBytes(&addr, &padded);
+    return addr;
+}
+
+fn hexToHash(hex: []const u8) !input_mod.Hash {
+    const src = stripHex(hex);
+    var h: input_mod.Hash = [_]u8{0} ** 32;
+    if (src.len == 0) return h;
+    if (src.len > 64) return error.InvalidHash;
+    var padded: [64]u8 = [_]u8{'0'} ** 64;
+    @memcpy(padded[64 - src.len ..], src);
+    _ = try std.fmt.hexToBytes(&h, &padded);
+    return h;
+}
+
+fn hexToU64(hex: []const u8) !u64 {
+    const src = stripHex(hex);
+    if (src.len == 0) return 0;
+    return std.fmt.parseInt(u64, src, 16);
+}
+
+fn hexToU128(hex: []const u8) !u128 {
+    const src = stripHex(hex);
+    if (src.len == 0) return 0;
+    return std.fmt.parseInt(u128, src, 16);
+}
+
+fn hexToU256(hex: []const u8) !u256 {
+    const src = stripHex(hex);
+    if (src.len == 0) return 0;
+    return std.fmt.parseInt(u256, src, 16);
+}
+
+fn hexToBytes(alloc: std.mem.Allocator, hex: []const u8) ![]u8 {
+    const src = stripHex(hex);
+    if (src.len == 0) return alloc.dupe(u8, &.{});
+    if (src.len % 2 != 0) {
+        // odd-length: pad with leading zero
+        const padded = try std.fmt.allocPrint(alloc, "0{s}", .{src});
+        defer alloc.free(padded);
+        const buf = try alloc.alloc(u8, padded.len / 2);
+        _ = try std.fmt.hexToBytes(buf, padded);
+        return buf;
+    }
+    const buf = try alloc.alloc(u8, src.len / 2);
+    _ = try std.fmt.hexToBytes(buf, src);
+    return buf;
+}
+
+fn printHexBytes(bytes: []const u8) void {
+    for (bytes) |b| std.debug.print("{x:0>2}", .{b});
+    std.debug.print("\n", .{});
+}
+
+fn jsonU64(v: std.json.Value) !u64 {
+    return switch (v) {
+        .integer => |n| @intCast(n),
+        .string => |s| hexToU64(s) catch std.fmt.parseInt(u64, s, 10),
+        else => error.InvalidNumeric,
+    };
+}
+
+fn jsonU128(v: std.json.Value) !u128 {
+    return switch (v) {
+        .integer => |n| @intCast(n),
+        .string => |s| hexToU128(s) catch std.fmt.parseInt(u128, s, 10),
+        else => error.InvalidNumeric,
+    };
+}
+
+fn jsonU256(v: std.json.Value) !u256 {
+    return switch (v) {
+        .integer => |n| @intCast(n),
+        .string => |s| hexToU256(s) catch std.fmt.parseInt(u256, s, 10),
+        else => error.InvalidNumeric,
+    };
+}
+
+fn jStr(v: std.json.Value) ?[]const u8 {
+    return if (v == .string) v.string else null;
+}
+
+// ─── Transaction builder ──────────────────────────────────────────────────────
+
+/// Build a TxInput for one post-entry combination.
+/// Uses transaction.sender directly (no ECDSA); v/r/s left null so transition
+/// falls through to the tx.from path.
+fn buildTx(
+    alloc: std.mem.Allocator,
+    txn: std.json.ObjectMap,
+    di: usize,
+    gi: usize,
+    vi: usize,
+) !input_mod.TxInput {
+    var tx = input_mod.TxInput{};
+
+    // Transaction type (default 0; infer from fields if absent)
+    if (txn.get("type")) |v| tx.type = @intCast(jsonU64(v) catch 0);
+
+    // Nonce
+    if (txn.get("nonce")) |v| tx.nonce = jsonU64(v) catch 0;
+
+    // Indexed: gasLimit[gi]
+    if (txn.get("gasLimit")) |v| {
+        if (v == .array and gi < v.array.items.len) {
+            const gv = v.array.items[gi];
+            if (jStr(gv)) |s| tx.gas = hexToU64(s) catch tx.gas;
+        }
+    }
+
+    // Indexed: value[vi]
+    if (txn.get("value")) |v| {
+        if (v == .array and vi < v.array.items.len) {
+            const vv = v.array.items[vi];
+            if (jStr(vv)) |s| tx.value = hexToU256(s) catch 0;
+        }
+    }
+
+    // Indexed: data[di]
+    if (txn.get("data")) |v| {
+        if (v == .array and di < v.array.items.len) {
+            const dv = v.array.items[di];
+            if (jStr(dv)) |s| tx.data = try hexToBytes(alloc, s);
+        }
+    }
+
+    // Destination (empty string or "0x" → contract creation)
+    if (txn.get("to")) |v| {
+        if (v != .null) {
+            if (jStr(v)) |s| {
+                if (s.len > 0 and !std.mem.eql(u8, s, "0x")) {
+                    tx.to = hexToAddr(s) catch null;
+                }
+            }
+        }
+    }
+
+    // Sender — set tx.from directly; transition() will use it without ECDSA
+    if (txn.get("sender")) |v| {
+        if (jStr(v)) |s| tx.from = hexToAddr(s) catch null;
+    }
+
+    // Gas pricing
+    if (txn.get("gasPrice")) |v| tx.gas_price = jsonU128(v) catch null;
+    if (txn.get("maxFeePerGas")) |v| tx.max_fee_per_gas = jsonU128(v) catch null;
+    if (txn.get("maxPriorityFeePerGas")) |v| tx.max_priority_fee_per_gas = jsonU128(v) catch null;
+
+    // Chain ID / EIP-155
+    if (txn.get("chainId")) |v| tx.chain_id = jsonU64(v) catch null;
+    if (txn.get("protected")) |v| tx.protected = if (v == .bool) v.bool else true;
+
+    // Access list — fixtures use "accessLists" (plural, indexed array like data/gasLimit/value).
+    // accessLists[di] selects the access list for this (data, gas, value) combination.
+    // Fall back to singular "accessList" for non-indexed formats.
+    const al_json_val: ?std.json.Value = blk: {
+        if (txn.get("accessLists")) |v| {
+            if (v == .array and di < v.array.items.len) break :blk v.array.items[di];
+        }
+        if (txn.get("accessList")) |v| break :blk v;
+        break :blk null;
+    };
+    if (al_json_val) |alv| {
+        if (alv == .array) {
+            var al = std.ArrayListUnmanaged(input_mod.AccessListEntry){};
+            for (alv.array.items) |al_item| {
+                if (al_item != .object) continue;
+                const alo = al_item.object;
+                const entry_addr = if (alo.get("address")) |av|
+                    hexToAddr(jStr(av) orelse "") catch [_]u8{0} ** 20
+                else
+                    [_]u8{0} ** 20;
+
+                var keys = std.ArrayListUnmanaged(input_mod.Hash){};
+                if (alo.get("storageKeys")) |skv| {
+                    if (skv == .array) {
+                        for (skv.array.items) |sk_item| {
+                            if (jStr(sk_item)) |s| {
+                                try keys.append(alloc, hexToHash(s) catch [_]u8{0} ** 32);
+                            }
+                        }
+                    }
+                }
+                try al.append(alloc, .{
+                    .address = entry_addr,
+                    .storage_keys = try keys.toOwnedSlice(alloc),
+                });
+            }
+            tx.access_list = try al.toOwnedSlice(alloc);
+        }
+    }
+
+    // Infer type from fields if not explicitly set
+    if (tx.type == 0) {
+        if (tx.max_fee_per_gas != null) {
+            tx.type = 2;
+        } else if (tx.access_list.len > 0) {
+            tx.type = 1;
+        }
+    }
+
+    return tx;
+}
+
+// ─── JSON value → JSON string (for passing to existing parsers) ───────────────
+
+fn valueToJson(alloc: std.mem.Allocator, v: std.json.Value) ![]u8 {
+    return std.json.Stringify.valueAlloc(alloc, v, .{});
+}
+
+// ─── Main fixture runner ──────────────────────────────────────────────────────
+
+/// Process a fixture JSON file. For each (test, fork, idx) combination, runs the
+/// state transition and compares stateRoot + logsHash to expected values.
+///
+/// Parameters:
+///   alloc        — allocator (arena recommended; reset between files)
+///   json_text    — raw JSON content of the fixture file
+///   fork_filter  — if non-null, only run tests for this fork
+///   chain_id     — EVM chain ID (default 1)
+///   stop_on_fail — stop processing after the first failure
+///   quiet        — suppress per-test PASS output
+///   stats        — in/out: updated with PASS/FAIL/SKIP counts
+///   rel_path     — relative path for log messages
+///
+/// Returns true unless stop_on_fail is set and a failure occurs.
+pub fn runFixture(
+    alloc: std.mem.Allocator,
+    json_text: []const u8,
+    fork_filter: ?[]const u8,
+    chain_id: u64,
+    stop_on_fail: bool,
+    quiet: bool,
+    stats: *RunStats,
+    rel_path: []const u8,
+) !bool {
+    const parsed = try std.json.parseFromSlice(std.json.Value, alloc, json_text, .{
+        .duplicate_field_behavior = .use_last,
+    });
+    defer parsed.deinit();
+
+    const root = switch (parsed.value) {
+        .object => |o| o,
+        else => return true,
+    };
+
+    var test_it = root.iterator();
+    while (test_it.next()) |test_kv| {
+        const test_name = test_kv.key_ptr.*;
+        const test_obj = switch (test_kv.value_ptr.*) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        // Pre-state and env
+        const pre_json_val = test_obj.get("pre") orelse continue;
+        const env_json_val = test_obj.get("env") orelse continue;
+        const txn_val = switch (test_obj.get("transaction") orelse continue) {
+            .object => |o| o,
+            else => continue,
+        };
+        const post_val = switch (test_obj.get("post") orelse continue) {
+            .object => |o| o,
+            else => continue,
+        };
+
+        // Parse pre-state and env once per test (shared across all post entries)
+        const pre_json = try valueToJson(alloc, pre_json_val);
+        const env_json = try valueToJson(alloc, env_json_val);
+
+        const pre_alloc_base = input_mod.parseAlloc(alloc, pre_json) catch continue;
+        const env = input_mod.parseEnv(alloc, env_json) catch continue;
+
+        // Iterate forks
+        var fork_it = post_val.iterator();
+        while (fork_it.next()) |fork_kv| {
+            const fork = fork_kv.key_ptr.*;
+
+            // Fork filter
+            if (fork_filter) |ff| {
+                if (!std.mem.eql(u8, fork, ff)) continue;
+            }
+
+            // Resolve spec (skip unknown forks)
+            const spec = transition_mod.specFromFork(fork) orelse {
+                const post_entries = switch (fork_kv.value_ptr.*) {
+                    .array => |a| a.items,
+                    else => continue,
+                };
+                stats.skipped += @intCast(post_entries.len);
+                if (!quiet) {
+                    std.debug.print("SKIP  {s}  (fork {s} not supported)\n", .{ rel_path, fork });
+                }
+                continue;
+            };
+
+            const post_entries = switch (fork_kv.value_ptr.*) {
+                .array => |a| a.items,
+                else => continue,
+            };
+
+            for (post_entries, 0..) |post_entry_v, post_idx| {
+                const post_entry = switch (post_entry_v) {
+                    .object => |o| o,
+                    else => continue,
+                };
+
+                // Expected hashes
+                const exp_hash_str = jStr(post_entry.get("hash") orelse continue) orelse continue;
+                const exp_logs_str = jStr(post_entry.get("logs") orelse continue) orelse continue;
+                const exp_hash = hexToHash(exp_hash_str) catch {
+                    stats.skipped += 1;
+                    continue;
+                };
+                const exp_logs = hexToHash(exp_logs_str) catch {
+                    stats.skipped += 1;
+                    continue;
+                };
+
+                // Decode indexes
+                const indexes_obj: ?std.json.ObjectMap = if (post_entry.get("indexes")) |iv|
+                    (if (iv == .object) iv.object else null)
+                else
+                    null;
+
+                const di: usize = if (indexes_obj) |io|
+                    @intCast(jsonU64(io.get("data") orelse .{ .integer = 0 }) catch 0)
+                else
+                    0;
+                const gi: usize = if (indexes_obj) |io|
+                    @intCast(jsonU64(io.get("gas") orelse .{ .integer = 0 }) catch 0)
+                else
+                    0;
+                const vi: usize = if (indexes_obj) |io|
+                    @intCast(jsonU64(io.get("value") orelse .{ .integer = 0 }) catch 0)
+                else
+                    0;
+
+                // Build the transaction for this post entry
+                const tx = buildTx(alloc, txn_val, di, gi, vi) catch |err| {
+                    stats.skipped += 1;
+                    if (!quiet) {
+                        std.debug.print("SKIP  {s}  {s}  {s}[{}]  (tx build error: {})\n", .{
+                            rel_path, test_name, fork, post_idx, err,
+                        });
+                    }
+                    continue;
+                };
+
+                // tx.from must be set; otherwise transition rejects the tx
+                if (tx.from == null) {
+                    stats.skipped += 1;
+                    if (!quiet) {
+                        std.debug.print("SKIP  {s}  {s}  {s}[{}]  (no sender)\n", .{
+                            rel_path, test_name, fork, post_idx,
+                        });
+                    }
+                    continue;
+                }
+
+                // Run state transition in a child arena so memory is reclaimed.
+                // Use page_allocator (not c_allocator) to keep our arena pages
+                // separate from the c_allocator heap used by the DB and JumpTable
+                // internals, avoiding heap corruption on arena deinit.
+                var child_arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
+                defer child_arena.deinit();
+                const ca = child_arena.allocator();
+
+                // Clone pre_alloc into child arena (the map header + all KV pairs)
+                const pre_clone = try cloneAllocMap(ca, pre_alloc_base);
+
+                var txs = [1]input_mod.TxInput{tx};
+                const result = transition_mod.transition(
+                    ca,
+                    pre_clone,
+                    env,
+                    txs[0..],
+                    spec,
+                    chain_id,
+                    0, // no mining reward in state tests
+                ) catch |err| {
+                    stats.failed += 1;
+                    std.debug.print("FAIL  {s}  {s}  {s}[{}]  (transition: {})\n", .{
+                        rel_path, test_name, fork, post_idx, err,
+                    });
+                    if (stop_on_fail) return false;
+                    continue;
+                };
+
+                const got_state = output_mod.computeStateRoot(ca, result.alloc) catch [_]u8{0} ** 32;
+                const got_logs = output_mod.computeLogsHash(ca, result.receipts) catch [_]u8{0} ** 32;
+
+                if (std.mem.eql(u8, &got_state, &exp_hash) and
+                    std.mem.eql(u8, &got_logs, &exp_logs))
+                {
+                    stats.passed += 1;
+                    if (!quiet) {
+                        std.debug.print("PASS  {s}  {s}  {s}[{}]\n", .{
+                            rel_path, test_name, fork, post_idx,
+                        });
+                    }
+                } else {
+                    stats.failed += 1;
+                    std.debug.print("FAIL  {s}  {s}  {s}[{}]\n", .{
+                        rel_path, test_name, fork, post_idx,
+                    });
+                    if (!std.mem.eql(u8, &got_state, &exp_hash)) {
+                        std.debug.print("      stateRoot  got=0x", .{});
+                        printHexBytes(&got_state);
+                        std.debug.print("                 exp=0x", .{});
+                        printHexBytes(&exp_hash);
+                    }
+                    if (!std.mem.eql(u8, &got_logs, &exp_logs)) {
+                        std.debug.print("      logsHash   got=0x", .{});
+                        printHexBytes(&got_logs);
+                        std.debug.print("                 exp=0x", .{});
+                        printHexBytes(&exp_logs);
+                    }
+                    if (stop_on_fail) return false;
+                }
+            }
+        }
+    }
+
+    return true;
+}
+
+// ─── Deep clone of alloc map ──────────────────────────────────────────────────
+
+/// Clone the pre-state alloc map into the given allocator so that the transition
+/// can be run in an isolated child arena without corrupting the base pre-state.
+fn cloneAllocMap(
+    alloc: std.mem.Allocator,
+    src: std.AutoHashMapUnmanaged(input_mod.Address, input_mod.AllocAccount),
+) !std.AutoHashMapUnmanaged(input_mod.Address, input_mod.AllocAccount) {
+    var dst = std.AutoHashMapUnmanaged(input_mod.Address, input_mod.AllocAccount){};
+    var it = src.iterator();
+    while (it.next()) |entry| {
+        var acct = input_mod.AllocAccount{
+            .balance = entry.value_ptr.balance,
+            .nonce = entry.value_ptr.nonce,
+            .code = try alloc.dupe(u8, entry.value_ptr.code),
+        };
+        var sit = entry.value_ptr.storage.iterator();
+        while (sit.next()) |slot| {
+            try acct.storage.put(alloc, slot.key_ptr.*, slot.value_ptr.*);
+        }
+        try dst.put(alloc, entry.key_ptr.*, acct);
+    }
+    return dst;
+}

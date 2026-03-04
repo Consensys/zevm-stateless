@@ -107,6 +107,8 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
         .{ .k = "Shanghai", .v = .shanghai },
         .{ .k = "Cancun", .v = .cancun },
         .{ .k = "Prague", .v = .prague },
+        .{ .k = "Osaka", .v = .osaka },
+        .{ .k = "Amsterdam", .v = .amsterdam },
     };
     for (table) |e| {
         if (std.mem.eql(u8, name, e.k)) return e.v;
@@ -644,10 +646,10 @@ pub fn transition(
 
         for (exec_result.logs.items) |log| {
             // Convert topics from ArrayList to []Hash
-            var topics = try arena.alloc(input.Hash, log.topics.items.len);
-            for (log.topics.items, 0..) |t, ti| topics[ti] = t;
+            var topics = try arena.alloc(input.Hash, log.topics.len);
+            for (log.topics, 0..) |t, ti| topics[ti] = t;
 
-            bloom.addLog(&receipt_bloom, log.address, log.topics.items);
+            bloom.addLog(&receipt_bloom, log.address, log.topics);
             bloom.merge(&block_bloom, receipt_bloom);
 
             try receipt_logs.append(arena, Log{
