@@ -60,6 +60,15 @@ pub const Env = struct {
     withdrawals: []Withdrawal = &.{},
 };
 
+/// EIP-7702 authorization item (pre-recovered: signer known from fixture).
+pub const AuthorizationItem = struct {
+    chain_id: U256 = 0,
+    address: Address = [_]u8{0} ** 20,
+    nonce: u64 = 0,
+    /// The recovered signer (authority). If null, treated as Invalid.
+    signer: ?Address = null,
+};
+
 pub const TxInput = struct {
     type: u8 = 0,
     nonce: ?u64 = null,
@@ -80,6 +89,8 @@ pub const TxInput = struct {
     access_list: []AccessListEntry = &.{},
     blob_versioned_hashes: []Hash = &.{},
     max_fee_per_blob_gas: ?u128 = null,
+    /// EIP-7702: authorization list for type 4 transactions.
+    authorization_list: []AuthorizationItem = &.{},
 };
 
 // ─── Hex/number helpers ───────────────────────────────────────────────────────

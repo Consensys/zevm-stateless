@@ -231,9 +231,54 @@ fn buildTx(
         }
     }
 
+    // EIP-4844: blob versioned hashes and max fee per blob gas
+    if (txn.get("blobVersionedHashes")) |bvhv| {
+        if (bvhv == .array) {
+            var hashes = std.ArrayListUnmanaged(input_mod.Hash){};
+            for (bvhv.array.items) |h_item| {
+                if (jStr(h_item)) |s| {
+                    try hashes.append(alloc, hexToHash(s) catch [_]u8{0} ** 32);
+                }
+            }
+            tx.blob_versioned_hashes = try hashes.toOwnedSlice(alloc);
+        }
+    }
+    if (txn.get("maxFeePerBlobGas")) |v| tx.max_fee_per_blob_gas = jsonU128(v) catch null;
+
+    // EIP-7702: authorization list
+    var has_authorization_list_field = false;
+    if (txn.get("authorizationList")) |alv| {
+        if (alv == .array) {
+            has_authorization_list_field = true;
+            var auth_items = std.ArrayListUnmanaged(input_mod.AuthorizationItem){};
+            for (alv.array.items) |item| {
+                if (item != .object) continue;
+                const obj = item.object;
+                var ai = input_mod.AuthorizationItem{};
+                if (obj.get("chainId")) |v| ai.chain_id = hexToU256(jStr(v) orelse "0") catch 0;
+                if (obj.get("address")) |v| ai.address = hexToAddr(jStr(v) orelse "") catch [_]u8{0} ** 20;
+                if (obj.get("nonce")) |v| ai.nonce = hexToU64(jStr(v) orelse "0") catch 0;
+                if (obj.get("signer")) |v| ai.signer = hexToAddr(jStr(v) orelse "") catch null;
+                // EIP-7702 requires low-S: if s > N/2, the authorization is invalid (signer=None).
+                // SECP256K1N/2 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0
+                if (obj.get("s")) |sv| {
+                    const s_val = hexToU256(jStr(sv) orelse "0") catch 0;
+                    const secp256k1_n_over_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
+                    if (s_val > secp256k1_n_over_2) ai.signer = null;
+                }
+                try auth_items.append(alloc, ai);
+            }
+            tx.authorization_list = try auth_items.toOwnedSlice(alloc);
+        }
+    }
+
     // Infer type from fields if not explicitly set
     if (tx.type == 0) {
-        if (tx.max_fee_per_gas != null) {
+        if (has_authorization_list_field) {
+            tx.type = 4;
+        } else if (tx.blob_versioned_hashes.len > 0 or tx.max_fee_per_blob_gas != null) {
+            tx.type = 3;
+        } else if (tx.max_fee_per_gas != null) {
             tx.type = 2;
         } else if (tx.access_list.len > 0) {
             tx.type = 1;

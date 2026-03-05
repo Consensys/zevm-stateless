@@ -381,7 +381,15 @@ fn buildDb(
         const acct = entry.value_ptr.*;
 
         const code_hash: primitives.Hash = if (acct.code.len > 0) blk: {
-            const bc = bytecode_mod.Bytecode.newLegacy(acct.code);
+            // Detect EIP-7702 delegation designators (EF 01 00 <20-byte address>)
+            // and load them as Eip7702Bytecode so zevm recognizes them as delegations.
+            const bc: bytecode_mod.Bytecode = if (acct.code.len == 23 and
+                acct.code[0] == 0xEF and acct.code[1] == 0x01 and acct.code[2] == 0x00)
+            blk2: {
+                var delegation_addr: primitives.Address = [_]u8{0} ** 20;
+                @memcpy(&delegation_addr, acct.code[3..23]);
+                break :blk2 bytecode_mod.Bytecode{ .eip7702 = bytecode_mod.Eip7702Bytecode.new(delegation_addr) };
+            } else bytecode_mod.Bytecode.newLegacy(acct.code);
             const h = bc.hashSlow();
             try db.insertCode(h, bc);
             break :blk h;
@@ -422,9 +430,9 @@ fn buildBlockEnv(env: input.Env) context_mod.BlockEnv {
     block.basefee = env.base_fee orelse 0;
     block.difficulty = env.difficulty;
     block.prevrandao = env.random;
-    // Blob gas
+    // Blob gas — compute blob_gasprice via fake_exponential, not hardcode 1
     if (env.excess_blob_gas) |ebg| {
-        block.blob_excess_gas_and_price = .{ .excess_blob_gas = ebg, .blob_gasprice = 1 };
+        block.setBlobExcessGasAndPrice(ebg, primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE);
     }
     return block;
 }
@@ -494,6 +502,34 @@ pub fn transition(
             continue;
         }
 
+        // 1b. Validate tx type is supported by the current fork
+        {
+            const type_supported = switch (tx.type) {
+                0 => true,
+                1 => primitives.isEnabledIn(spec, .berlin),
+                2 => primitives.isEnabledIn(spec, .london),
+                3 => primitives.isEnabledIn(spec, .cancun),
+                4 => primitives.isEnabledIn(spec, .prague),
+                else => false,
+            };
+            if (!type_supported) {
+                try rejected.append(arena, .{
+                    .index = tx_idx,
+                    .err = "transaction type not supported by this fork",
+                });
+                continue;
+            }
+        }
+
+        // 1c. EIP-7825 (Osaka+): max gas limit per transaction = 2^24
+        if (primitives.isEnabledIn(spec, .osaka) and tx.gas > 0x01000000) {
+            try rejected.append(arena, .{
+                .index = tx_idx,
+                .err = "gas limit exceeds EIP-7825 maximum (2^24)",
+            });
+            continue;
+        }
+
         // 2. Compute tx hash
         const tx_hash_val = txHash(arena, tx, chain_id) catch [_]u8{0} ** 32;
 
@@ -506,7 +542,8 @@ pub fn transition(
 
         // Gas pricing
         switch (tx.type) {
-            2 => {
+            2, 3, 4 => {
+                // EIP-1559 (type 2), EIP-4844 (type 3), EIP-7702 (type 4): max_fee_per_gas + priority fee
                 ctx.tx.gas_price = tx.max_fee_per_gas orelse 0;
                 ctx.tx.gas_priority_fee = tx.max_priority_fee_per_gas;
             },
@@ -514,6 +551,41 @@ pub fn transition(
                 ctx.tx.gas_price = tx.gas_price orelse tx.max_fee_per_gas orelse 0;
                 ctx.tx.gas_priority_fee = null;
             },
+        }
+
+        // EIP-4844: pass blob hashes and max fee per blob gas to the EVM context
+        if (ctx.tx.blob_hashes) |*old_bh| old_bh.deinit(std.heap.c_allocator);
+        if (tx.type == 3 and tx.blob_versioned_hashes.len > 0) {
+            var blob_list = std.ArrayList(primitives.Hash){};
+            blob_list.appendSlice(std.heap.c_allocator, tx.blob_versioned_hashes) catch {};
+            ctx.tx.blob_hashes = blob_list;
+            ctx.tx.max_fee_per_blob_gas = tx.max_fee_per_blob_gas orelse 0;
+        } else {
+            ctx.tx.blob_hashes = null;
+            ctx.tx.max_fee_per_blob_gas = 0;
+        }
+
+        // EIP-7702: populate authorization list for type 4 transactions
+        if (ctx.tx.authorization_list) |*old_al| old_al.deinit(std.heap.c_allocator);
+        if (tx.type == 4 and tx.authorization_list.len > 0) {
+            var auth_list = std.ArrayList(context_mod.Either){};
+            for (tx.authorization_list) |ai| {
+                const recovered = context_mod.RecoveredAuthorization.newUnchecked(
+                    context_mod.Authorization{
+                        .chain_id = ai.chain_id,
+                        .address = ai.address,
+                        .nonce = ai.nonce,
+                    },
+                    if (ai.signer) |s|
+                        context_mod.RecoveredAuthority{ .Valid = s }
+                    else
+                        context_mod.RecoveredAuthority.Invalid,
+                );
+                auth_list.append(std.heap.c_allocator, context_mod.Either{ .Right = recovered }) catch {};
+            }
+            ctx.tx.authorization_list = auth_list;
+        } else {
+            ctx.tx.authorization_list = null;
         }
 
         // Chain ID
@@ -565,6 +637,19 @@ pub fn transition(
             ctx.tx.access_list = context_mod.AccessList{ .items = null };
         }
 
+        // EIP-7702: type 4 transaction with empty authorization list is invalid.
+        if (tx.type == 4 and tx.authorization_list.len == 0) {
+            ctx.journaled_state.discardTx();
+            try rejected.append(arena, .{ .index = tx_idx, .err = "type 4 transaction with empty authorization list" });
+            if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+            ctx.tx.data = null;
+            ctx.tx.access_list.deinit();
+            if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+            ctx.tx.blob_hashes = null;
+            ctx.tx.authorization_list = null;
+            continue;
+        }
+
         // 3b. Pre-validate sender state — zevm's ExecuteEvm.execute() swallows
         // validation errors and returns Fail(0 gas). To correctly classify
         // invalid txs as "rejected" (vs failed-execution with a receipt), we
@@ -577,6 +662,10 @@ pub fn transition(
                 if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+                ctx.tx.blob_hashes = null;
+                if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+                ctx.tx.authorization_list = null;
                 continue;
             };
             const sender_info = sender_load.data.info;
@@ -588,11 +677,21 @@ pub fn transition(
                 if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+                ctx.tx.blob_hashes = null;
+                if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+                ctx.tx.authorization_list = null;
                 continue;
             }
             const egp_check = effectiveGasPrice(tx, env.base_fee orelse 0);
             const max_gas_fee: u256 = @as(u256, tx.gas) * @as(u256, egp_check);
-            const max_cost = max_gas_fee + tx.value;
+            // EIP-4844: blob cost = blob_count * GAS_PER_BLOB * max_fee_per_blob_gas
+            const blob_cost: u256 = if (tx.type == 3) blk: {
+                const n: u256 = tx.blob_versioned_hashes.len;
+                const max_blob_fee: u256 = tx.max_fee_per_blob_gas orelse 0;
+                break :blk n * 131_072 * max_blob_fee;
+            } else 0;
+            const max_cost = max_gas_fee + tx.value + blob_cost;
             if (sender_info.balance < max_cost) {
                 ctx.journaled_state.discardTx();
                 const err_msg = std.fmt.allocPrint(arena, "insufficient funds: have {}, need {}", .{ sender_info.balance, max_cost }) catch "balance error";
@@ -600,6 +699,10 @@ pub fn transition(
                 if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+                ctx.tx.blob_hashes = null;
+                if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+                ctx.tx.authorization_list = null;
                 continue;
             }
         }
@@ -615,6 +718,10 @@ pub fn transition(
             if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
+            if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+            ctx.tx.blob_hashes = null;
+            if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+            ctx.tx.authorization_list = null;
 
             const err_msg = std.fmt.allocPrint(arena, "{}", .{err}) catch "execution error";
             try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
@@ -625,6 +732,10 @@ pub fn transition(
         if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
         ctx.tx.data = null;
         ctx.tx.access_list.deinit();
+        if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+        ctx.tx.blob_hashes = null;
+        if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+        ctx.tx.authorization_list = null;
 
         // 5. Build receipt
         const gas_used = exec_result.gas_used;
@@ -689,7 +800,9 @@ pub fn transition(
             .status = status,
             .effective_gas_price = egp,
             .blob_gas_used = if (tx.type == 3) tx.blob_versioned_hashes.len * 131_072 else null,
-            .blob_gas_price = if (tx.type == 3) if (env.excess_blob_gas) |g| @as(u128, g) else null else null,
+            .blob_gas_price = if (tx.type == 3)
+                if (ctx.block.blob_excess_gas_and_price) |bep| @as(u128, bep.blob_gasprice) else null
+            else null,
         });
 
         // Free execution result logs (exec_result.logs is an ArrayList we own)
@@ -790,14 +903,37 @@ fn extractPostState(
         // KECCAK_EMPTY means empty code; otherwise look up actual bytes.
         // Note: Bytecode.new() (default/empty in zevm) has originalBytes() = &[0x00]
         // even though the account has no code — so we must check code_hash first.
+        // IMPORTANT: Eip7702Bytecode.raw() returns &self.raw_bytes where self is a value
+        // parameter, so it returns a dangling pointer when called on a copy. For EIP-7702
+        // bytecode we construct the bytes directly from the address field instead.
         if (!std.mem.eql(u8, &account.info.code_hash, &primitives.KECCAK_EMPTY)) {
             // Account has real code — get bytes from embedded code or DB
             if (account.info.code) |bc| {
-                const raw = bc.originalBytes();
-                acct.code = if (raw.len > 0) raw else &.{};
+                if (bc == .eip7702) {
+                    // EIP-7702 delegation: 0xEF 0x01 0x00 <20-byte address>
+                    const buf = try arena.alloc(u8, 23);
+                    buf[0] = 0xEF;
+                    buf[1] = 0x01;
+                    buf[2] = 0x00;
+                    @memcpy(buf[3..], &bc.eip7702.address);
+                    acct.code = buf;
+                } else {
+                    const raw = bc.originalBytes();
+                    acct.code = if (raw.len > 0) raw else &.{};
+                }
             } else {
-                if (ctx.journaled_state.database.codeByHash(account.info.code_hash)) |bc| {
-                    acct.code = bc.originalBytes();
+                if (ctx.journaled_state.database.codeByHash(account.info.code_hash)) |db_bc| {
+                    if (db_bc == .eip7702) {
+                        const buf = try arena.alloc(u8, 23);
+                        buf[0] = 0xEF;
+                        buf[1] = 0x01;
+                        buf[2] = 0x00;
+                        @memcpy(buf[3..], &db_bc.eip7702.address);
+                        acct.code = buf;
+                    } else {
+                        const raw = db_bc.originalBytes();
+                        acct.code = if (raw.len > 0) raw else &.{};
+                    }
                 } else |_| {}
             }
         } else {
