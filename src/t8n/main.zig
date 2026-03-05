@@ -19,7 +19,7 @@
 /// Execution flags:
 ///   --state.fork FORK     Fork name (default: Cancun)
 ///   --state.chainid N     Chain ID (default: 1)
-///   --state.reward N      Mining reward in wei, -1 to disable (default: 0)
+///   --state.reward N      Mining reward in wei, -1 to disable (default: -1)
 ///
 /// Special file values: "stdout" or "stderr" write to those streams.
 /// When multiple outputs go to stdout, they are combined as {"alloc":..., "result":...}.
@@ -53,7 +53,7 @@ pub fn main() !void {
     var output_body_path: ?[]const u8 = null;
     var state_fork: []const u8 = "Cancun";
     var state_chainid: u64 = 1;
-    var state_reward: i64 = 0;
+    var state_reward: i64 = -1;
     var trace_enabled: bool = false;
 
     var i: usize = 1;
@@ -289,8 +289,12 @@ fn getFlag(arg: []const u8, args: []const []const u8, i: *usize) ?[]const u8 {
             return next;
         }
         // Next arg starts with '-' but might still be a value (e.g. --state.reward -1)
-        // Accept if it looks like a number
-        if (next.len > 1 and (std.ascii.isDigit(next[1]) or next[1] == '-')) {
+        // Accept only if it looks like a negative number: '-' followed by a digit
+        if (next.len > 2 and next[1] == '-' and std.ascii.isDigit(next[2])) {
+            i.* += 1;
+            return next;
+        }
+        if (next.len > 1 and std.ascii.isDigit(next[1])) {
             i.* += 1;
             return next;
         }

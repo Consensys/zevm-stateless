@@ -292,89 +292,6 @@ const KECCAK_EMPTY: [32]u8 = [_]u8{
 
 // ─── result.json writer ───────────────────────────────────────────────────────
 
-pub fn writeResult(
-    alloc: std.mem.Allocator,
-    writer: anytype,
-    result: transition.TransitionResult,
-    block_number: u64,
-    difficulty: u256,
-) !void {
-    const logs_hash = try computeLogsHash(alloc, result.receipts);
-    _ = block_number;
-
-    // Stubs for unimplemented fields
-    const ZERO_HASH = [_]u8{0} ** 32;
-
-    try writer.writeAll("{\n");
-
-    // State/tx/receipts roots (stubs — MPT construction not yet implemented)
-    try writer.writeAll("  \"stateRoot\": ");
-    try writeHash(writer, ZERO_HASH);
-    try writer.writeAll(",\n");
-
-    try writer.writeAll("  \"txRoot\": ");
-    try writeHash(writer, ZERO_HASH);
-    try writer.writeAll(",\n");
-
-    try writer.writeAll("  \"receiptsRoot\": ");
-    try writeHash(writer, ZERO_HASH);
-    try writer.writeAll(",\n");
-
-    // Logs hash (computed from actual logs)
-    try writer.writeAll("  \"logsHash\": ");
-    try writeHash(writer, logs_hash);
-    try writer.writeAll(",\n");
-
-    // Block bloom filter
-    try writer.writeAll("  \"logsBloom\": ");
-    try writeBloom(writer, result.block_bloom);
-    try writer.writeAll(",\n");
-
-    // Receipts array
-    try writer.writeAll("  \"receipts\": [\n");
-    for (result.receipts, 0..) |receipt, i| {
-        try writeReceiptJson(writer, receipt);
-        if (i < result.receipts.len - 1) try writer.writeAll(",");
-        try writer.writeAll("\n");
-    }
-    try writer.writeAll("  ],\n");
-
-    // Rejected transactions
-    try writer.writeAll("  \"rejected\": [\n");
-    for (result.rejected, 0..) |rej, i| {
-        try writer.writeAll("    {");
-        try writer.print("\"index\": {}, \"error\": ", .{rej.index});
-        try writeJsonString(writer, rej.err);
-        try writer.writeAll("}");
-        if (i < result.rejected.len - 1) try writer.writeAll(",");
-        try writer.writeAll("\n");
-    }
-    try writer.writeAll("  ],\n");
-
-    // Block-level fields
-    try writer.writeAll("  \"currentDifficulty\": ");
-    try writeU256Hex(writer, difficulty);
-    try writer.writeAll(",\n");
-
-    try writer.writeAll("  \"gasUsed\": ");
-    try writeU64Hex(writer, result.cumulative_gas);
-    try writer.writeAll("\n");
-
-    // Optional fields (only if present)
-    if (result.current_base_fee) |bf| {
-        // We already closed the last required field without comma; re-open
-        // Actually we need to add comma before these. Let me restructure.
-        // We'll add a trailing comma to gasUsed if optional fields exist.
-        _ = bf; // handled below with proper trailing comma logic
-    }
-
-    // NOTE: The JSON above has a trailing comma issue if optional fields follow.
-    // For correctness, we write gasUsed last among required fields,
-    // and handle optional fields by buffering. See writeResultBuffered below.
-    try writer.writeAll("}\n");
-}
-
-/// Buffered version that handles optional fields with correct JSON commas.
 pub fn writeResultJson(
     alloc: std.mem.Allocator,
     writer: anytype,
@@ -383,7 +300,7 @@ pub fn writeResultJson(
 ) !void {
     const logs_hash = try computeLogsHash(alloc, result.receipts);
     const state_root = try computeStateRoot(alloc, result.alloc);
-    const tx_root = try computeTxRoot(alloc, result.txs, result.chain_id);
+    const tx_root = try computeTxRoot(alloc, result.accepted_txs, result.chain_id);
     const receipts_root = try computeReceiptsRoot(alloc, result.receipts);
 
     // Collect all fields into a list, then join with commas

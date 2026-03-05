@@ -66,8 +66,8 @@ pub const TransitionResult = struct {
     current_base_fee: ?u64,
     excess_blob_gas: ?u64,
     blob_gas_used: u64,
-    // Original txs (used for txRoot computation)
-    txs: []input.TxInput,
+    // Accepted txs only (rejected txs excluded, used for txRoot computation)
+    accepted_txs: []input.TxInput,
     chain_id: u64,
 };
 
@@ -474,6 +474,7 @@ pub fn transition(
 
     var receipts = std.ArrayListUnmanaged(Receipt){};
     var rejected = std.ArrayListUnmanaged(RejectedTx){};
+    var accepted_txs = std.ArrayListUnmanaged(input.TxInput){};
     var cumulative_gas: u64 = 0;
     var block_bloom = bloom.ZERO;
     var total_blob_gas: u64 = 0;
@@ -807,6 +808,9 @@ pub fn transition(
 
         // Free execution result logs (exec_result.logs is an ArrayList we own)
         exec_result.logs.deinit(std.heap.c_allocator);
+
+        // Track accepted transactions (for txRoot — rejected txs are excluded)
+        try accepted_txs.append(arena, tx.*);
     }
 
     // ── Apply mining reward ───────────────────────────────────────────────────
@@ -846,7 +850,7 @@ pub fn transition(
         .current_base_fee = env.base_fee,
         .excess_blob_gas = env.excess_blob_gas,
         .blob_gas_used = total_blob_gas,
-        .txs = txs,
+        .accepted_txs = try accepted_txs.toOwnedSlice(arena),
         .chain_id = chain_id,
     };
 }
