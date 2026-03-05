@@ -194,11 +194,17 @@ fn buildTx(
     // Access list — fixtures use "accessLists" (plural, indexed array like data/gasLimit/value).
     // accessLists[di] selects the access list for this (data, gas, value) combination.
     // Fall back to singular "accessList" for non-indexed formats.
+    // Track whether the field was present at all: presence indicates type-1 even with empty list.
+    var has_access_list_field = false;
     const al_json_val: ?std.json.Value = blk: {
         if (txn.get("accessLists")) |v| {
+            has_access_list_field = true;
             if (v == .array and di < v.array.items.len) break :blk v.array.items[di];
         }
-        if (txn.get("accessList")) |v| break :blk v;
+        if (txn.get("accessList")) |v| {
+            has_access_list_field = true;
+            break :blk v;
+        }
         break :blk null;
     };
     if (al_json_val) |alv| {
@@ -280,7 +286,7 @@ fn buildTx(
             tx.type = 3;
         } else if (tx.max_fee_per_gas != null) {
             tx.type = 2;
-        } else if (tx.access_list.len > 0) {
+        } else if (has_access_list_field or tx.access_list.len > 0) {
             tx.type = 1;
         }
     }
@@ -463,7 +469,7 @@ pub fn runFixture(
                     txs[0..],
                     spec,
                     chain_id,
-                    0, // no mining reward in state tests
+                    -1, // no mining reward in state tests (avoids spurious coinbase touch)
                 ) catch |err| {
                     stats.failed += 1;
                     std.debug.print("FAIL  {s}  {s}  {s}[{}]  (transition: {})\n", .{

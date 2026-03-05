@@ -556,7 +556,9 @@ pub fn transition(
 
         // EIP-4844: pass blob hashes and max fee per blob gas to the EVM context
         if (ctx.tx.blob_hashes) |*old_bh| old_bh.deinit(std.heap.c_allocator);
-        if (tx.type == 3 and tx.blob_versioned_hashes.len > 0) {
+        if (tx.type == 3) {
+            // Always create a blob_hashes list for type-3 txs (even if empty), so that
+            // validateBlobTx sees an empty list and rejects it with EmptyBlobList.
             var blob_list = std.ArrayList(primitives.Hash){};
             blob_list.appendSlice(std.heap.c_allocator, tx.blob_versioned_hashes) catch {};
             ctx.tx.blob_hashes = blob_list;
@@ -957,10 +959,13 @@ fn extractPostState(
             }
         }
 
-        // EIP-161: remove empty accounts (nonce=0, balance=0, no code, no storage)
-        if (acct.nonce == 0 and acct.balance == 0 and acct.code.len == 0 and acct.storage.count() == 0) {
-            _ = post.remove(addr);
-            continue;
+        // EIP-161 (Spurious Dragon+): remove empty accounts from state.
+        // Pre-Spurious Dragon (Frontier/Homestead/Tangerine): empty accounts persist.
+        if (primitives.isEnabledIn(ctx.cfg.spec, .spurious_dragon)) {
+            if (acct.nonce == 0 and acct.balance == 0 and acct.code.len == 0 and acct.storage.count() == 0) {
+                _ = post.remove(addr);
+                continue;
+            }
         }
 
         try post.put(arena, addr, acct);
