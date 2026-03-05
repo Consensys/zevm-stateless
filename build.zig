@@ -10,6 +10,12 @@ pub fn build(b: *std.Build) void {
     lib_options.addOption(bool, "enable_mcl", false);
     const lib_options_module = lib_options.createModule();
 
+    // Build options for native tools (spec-test-runner, t8n) — crypto enabled for correct precompile behavior
+    const native_lib_options = b.addOptions();
+    native_lib_options.addOption(bool, "enable_blst", true);
+    native_lib_options.addOption(bool, "enable_mcl", true);
+    const native_lib_options_module = native_lib_options.createModule();
+
     // zevm dependency
     const zevm_dep = b.dependency("zevm", .{
         .target = target,
@@ -213,6 +219,10 @@ pub fn build(b: *std.Build) void {
     const local_handler = zevm_local_dep.module("handler");
     const local_precompile = zevm_local_dep.module("precompile");
 
+    // Enable blst and mcl for native tools: override build_options and expose headers
+    local_precompile.addImport("build_options", native_lib_options_module);
+    local_precompile.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+
     // mpt_builder: standalone trie builder (no external deps)
     const mpt_builder_mod = b.addModule("mpt_builder", .{
         .root_source_file = b.path("src/mpt/builder.zig"),
@@ -246,6 +256,9 @@ pub fn build(b: *std.Build) void {
     t8n_exe.linkSystemLibrary("crypto");
     t8n_exe.linkSystemLibrary("c");
     t8n_exe.linkSystemLibrary("m");
+    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
+    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    t8n_exe.linkLibCpp();
 
     b.installArtifact(t8n_exe);
 
@@ -290,6 +303,9 @@ pub fn build(b: *std.Build) void {
     spec_test_exe.linkSystemLibrary("crypto");
     spec_test_exe.linkSystemLibrary("c");
     spec_test_exe.linkSystemLibrary("m");
+    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
+    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    spec_test_exe.linkLibCpp();
 
     b.installArtifact(spec_test_exe);
 
