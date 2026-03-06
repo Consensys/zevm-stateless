@@ -10,9 +10,9 @@
 ///   - We call transition() and compare computed stateRoot + logsHash to expected hash / logs
 const std = @import("std");
 
-const input_mod = @import("../t8n/input.zig");
-const transition_mod = @import("../t8n/transition.zig");
-const output_mod = @import("../t8n/output.zig");
+const input_mod = @import("t8n_input");
+const transition_mod = @import("executor_transition");
+const output_mod = @import("executor_output");
 
 // ─── Public stats ─────────────────────────────────────────────────────────────
 

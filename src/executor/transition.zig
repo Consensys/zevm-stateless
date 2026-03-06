@@ -1,4 +1,4 @@
-/// Core state transition for the t8n tool.
+/// Core state transition for the EVM executor.
 ///
 /// Implements the Ethereum state transition function:
 ///   post_state, receipts = transition(pre_state, env, txs, fork, chain_id, reward)
@@ -12,9 +12,9 @@ const database_mod = @import("database");
 const context_mod = @import("context");
 const handler_mod = @import("handler");
 
-const input = @import("input.zig");
+const input = @import("executor_types");
 const bloom = @import("bloom.zig");
-const rlp = @import("rlp_encode.zig");
+const rlp = @import("executor_rlp_encode");
 const precompile_mod = @import("precompile");
 const secp_wrapper = precompile_mod.secp256k1_wrapper;
 

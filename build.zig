@@ -69,15 +69,27 @@ pub fn build(b: *std.Build) void {
     db_mod.addImport("mpt", mpt_mod);
     db_mod.addImport("input", input_mod);
 
+    // mpt_builder: standalone trie builder (no external deps)
+    const mpt_builder_mod = b.addModule("mpt_builder", .{
+        .root_source_file = b.path("src/mpt/builder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const executor_mod = b.addModule("executor", .{
         .root_source_file = b.path("src/executor/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     executor_mod.addImport("primitives", primitives);
+    executor_mod.addImport("state", state);
+    executor_mod.addImport("bytecode", bytecode);
+    executor_mod.addImport("database", database);
     executor_mod.addImport("context", context);
     executor_mod.addImport("handler", handler);
+    executor_mod.addImport("precompile", precompile);
     executor_mod.addImport("mpt", mpt_mod);
+    executor_mod.addImport("mpt_builder", mpt_builder_mod);
     executor_mod.addImport("db", db_mod);
     executor_mod.addImport("input", input_mod);
     executor_mod.addImport("output", output_mod);
@@ -223,12 +235,58 @@ pub fn build(b: *std.Build) void {
     local_precompile.addImport("build_options", native_lib_options_module);
     local_precompile.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
 
-    // mpt_builder: standalone trie builder (no external deps)
-    const mpt_builder_mod = b.addModule("mpt_builder", .{
-        .root_source_file = b.path("src/mpt/builder.zig"),
+    // ── Named executor modules for t8n / spec-test ───────────────────────────────
+    // These expose executor/ source files as named imports so that t8n and spec-test
+    // can import them without crossing module-root boundaries.
+
+    // executor_types — canonical EVM type definitions; no external deps
+    const executor_types_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/types.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // executor_rlp_encode — RLP encoding primitives; shared by transition and output
+    const executor_rlp_encode_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/rlp_encode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // native_executor_transition — transition logic using crypto-enabled local zevm
+    const native_executor_transition_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/transition.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_transition_mod.addImport("executor_types",      executor_types_mod);
+    native_executor_transition_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
+    native_executor_transition_mod.addImport("primitives",          local_primitives);
+    native_executor_transition_mod.addImport("state",          local_state);
+    native_executor_transition_mod.addImport("bytecode",       local_bytecode);
+    native_executor_transition_mod.addImport("database",       local_database);
+    native_executor_transition_mod.addImport("context",        local_context);
+    native_executor_transition_mod.addImport("handler",        local_handler);
+    native_executor_transition_mod.addImport("precompile",     local_precompile);
+
+    // native_executor_output — trie computations; uses executor_transition for type consistency
+    const native_executor_output_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/output.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_output_mod.addImport("executor_types",       executor_types_mod);
+    native_executor_output_mod.addImport("executor_rlp_encode",  executor_rlp_encode_mod);
+    native_executor_output_mod.addImport("executor_transition",  native_executor_transition_mod);
+    native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
+
+    // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
+    const t8n_input_mod = b.createModule(.{
+        .root_source_file = b.path("src/t8n/input.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    t8n_input_mod.addImport("executor_types", executor_types_mod);
 
     const t8n_exe = b.addExecutable(.{
         .name = "t8n",
@@ -237,14 +295,17 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",  .module = local_primitives  },
-                .{ .name = "state",       .module = local_state       },
-                .{ .name = "bytecode",    .module = local_bytecode    },
-                .{ .name = "database",    .module = local_database    },
-                .{ .name = "context",     .module = local_context     },
-                .{ .name = "handler",     .module = local_handler     },
-                .{ .name = "precompile",  .module = local_precompile  },
-                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
             },
         }),
     });
@@ -286,14 +347,18 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",  .module = local_primitives  },
-                .{ .name = "state",       .module = local_state       },
-                .{ .name = "bytecode",    .module = local_bytecode    },
-                .{ .name = "database",    .module = local_database    },
-                .{ .name = "context",     .module = local_context     },
-                .{ .name = "handler",     .module = local_handler     },
-                .{ .name = "precompile",  .module = local_precompile  },
-                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "t8n_input",           .module = t8n_input_mod                  },
             },
         }),
     });
