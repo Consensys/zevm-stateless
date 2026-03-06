@@ -50,6 +50,13 @@ pub fn build(b: *std.Build) void {
     });
     output_mod.addImport("primitives", primitives);
 
+    // mpt_nibbles: shared nibble utilities — standalone so mpt and mpt_builder can both use it
+    const mpt_nibbles_mod = b.createModule(.{
+        .root_source_file = b.path("src/mpt/nibbles.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mpt_mod = b.addModule("mpt", .{
         .root_source_file = b.path("src/mpt/main.zig"),
         .target = target,
@@ -57,6 +64,7 @@ pub fn build(b: *std.Build) void {
     });
     mpt_mod.addImport("primitives", primitives);
     mpt_mod.addImport("input", input_mod);
+    mpt_mod.addImport("mpt_nibbles", mpt_nibbles_mod);
 
     const db_mod = b.addModule("db", .{
         .root_source_file = b.path("src/db/main.zig"),
@@ -69,12 +77,13 @@ pub fn build(b: *std.Build) void {
     db_mod.addImport("mpt", mpt_mod);
     db_mod.addImport("input", input_mod);
 
-    // mpt_builder: standalone trie builder (no external deps)
+    // mpt_builder: standalone trie builder (shares nibbles with mpt via mpt_nibbles)
     const mpt_builder_mod = b.addModule("mpt_builder", .{
         .root_source_file = b.path("src/mpt/builder.zig"),
         .target = target,
         .optimize = optimize,
     });
+    mpt_builder_mod.addImport("mpt_nibbles", mpt_nibbles_mod);
 
     const executor_mod = b.addModule("executor", .{
         .root_source_file = b.path("src/executor/main.zig"),
@@ -93,6 +102,8 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("db", db_mod);
     executor_mod.addImport("input", input_mod);
     executor_mod.addImport("output", output_mod);
+    // Note: named executor sub-modules (executor_fork, executor_tx_decode, etc.)
+    // are added further below, after those module variables are created.
 
     const mod = b.addModule("zevm_stateless", .{
         .root_source_file = b.path("src/root.zig"),
@@ -131,6 +142,17 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("mpt", mpt_mod);
     exe.root_module.addImport("db", db_mod);
     exe.root_module.addImport("executor", executor_mod);
+
+    // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
+    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    exe.linkSystemLibrary("secp256k1");
+    exe.linkSystemLibrary("ssl");
+    exe.linkSystemLibrary("crypto");
+    exe.linkSystemLibrary("c");
+    exe.linkSystemLibrary("m");
+    exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
+    exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    exe.linkLibCpp();
 
     b.installArtifact(exe);
 
@@ -279,6 +301,31 @@ pub fn build(b: *std.Build) void {
     native_executor_output_mod.addImport("executor_rlp_encode",  executor_rlp_encode_mod);
     native_executor_output_mod.addImport("executor_transition",  native_executor_transition_mod);
     native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
+
+    // executor_fork — mainnet hardfork schedule (block/timestamp → SpecId + reward)
+    const executor_fork_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/fork.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_fork_mod.addImport("primitives", local_primitives);
+
+    // native_executor_tx_decode — raw RLP tx bytes → TxInput (no ECDSA here)
+    const native_executor_tx_decode_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/tx_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_tx_decode_mod.addImport("executor_types", executor_types_mod);
+    native_executor_tx_decode_mod.addImport("mpt",            mpt_mod);
+
+    // Wire named executor sub-modules into executor_mod (deferred — modules created above)
+    executor_mod.addImport("executor_types",      executor_types_mod);
+    executor_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
+    executor_mod.addImport("executor_transition", native_executor_transition_mod);
+    executor_mod.addImport("executor_output",     native_executor_output_mod);
+    executor_mod.addImport("executor_fork",       executor_fork_mod);
+    executor_mod.addImport("executor_tx_decode",  native_executor_tx_decode_mod);
 
     // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
     const t8n_input_mod = b.createModule(.{

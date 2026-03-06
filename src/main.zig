@@ -224,13 +224,13 @@ fn run() !void {
 
         std.debug.print("  transactions  = {d}\n",   .{si.transactions.len});
 
-        const proof_out = executor.executeBlock(si) catch |err| {
+        const proof_out = executor.executeBlock(allocator, si) catch |err| {
             std.debug.print("  FAIL → {}\n", .{err});
             std.process.exit(1);
         };
         std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
-        std.debug.print("  post_state_root = 0x{x}  (mock)\n", .{proof_out.post_state_root});
-        std.debug.print("  receipts_root   = 0x{x}  (mock)\n", .{proof_out.receipts_root});
+        std.debug.print("  post_state_root = 0x{x}\n", .{proof_out.post_state_root});
+        std.debug.print("  receipts_root   = 0x{x}\n", .{proof_out.receipts_root});
     }
 
     std.debug.print("\nDone.\n", .{});
