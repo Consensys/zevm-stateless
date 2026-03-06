@@ -28,6 +28,32 @@ pub fn commonPrefixLen(a: []const u8, b: []const u8) usize {
     return len;
 }
 
+/// Encode nibbles to hex-prefix (compact) bytes. `out` must be >= (nibbles.len / 2) + 1.
+/// Returns the written slice.
+pub fn hpEncode(nibbles: []const u8, is_leaf: bool, out: []u8) []u8 {
+    const flag: u8 = if (is_leaf) 2 else 0;
+    const odd = (nibbles.len % 2) != 0;
+    if (odd) {
+        // flag | 1, then first nibble in low bits of first byte, then pairs
+        out[0] = ((flag | 1) << 4) | nibbles[0];
+        var i: usize = 1;
+        var j: usize = 1;
+        while (i + 1 < nibbles.len) : ({i += 2; j += 1;}) {
+            out[j] = (nibbles[i] << 4) | nibbles[i + 1];
+        }
+        return out[0 .. 1 + nibbles.len / 2];
+    } else {
+        // flag byte (high nibble = flag, low nibble = 0), then pairs
+        out[0] = flag << 4;
+        var i: usize = 0;
+        var j: usize = 1;
+        while (i + 1 < nibbles.len) : ({i += 2; j += 1;}) {
+            out[j] = (nibbles[i] << 4) | nibbles[i + 1];
+        }
+        return out[0 .. 1 + nibbles.len / 2];
+    }
+}
+
 /// Decode a hex-prefix (compact) encoded path into nibbles written to `out`.
 ///
 /// Returns `{ is_leaf, len }` where `len` is the number of nibbles written.

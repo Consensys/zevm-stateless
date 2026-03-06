@@ -1,0 +1,15 @@
+[
+  {
+    "type": "0x2",
+    "nonce": "0x00",
+    "maxPriorityFeePerGas": "0x00",
+    "maxFeePerGas": "0x07d0",
+    "gas": "0x061a80",
+    "to": "0x036a8052a6b6cc6ad6e1bf702b78ecd910e8536a",
+    "value": "0x00",
+    "data": "0x",
+    "accessList": [],
+    "sender": "0xd57e229e3e4f14e04d5a080bee0755328b2da024",
+    "secretKey": "0xb4f4cc34c7d3f1a634f1c0d1036a8052a6b6cc6ad6e1bf702b78ecd910e8536a"
+  }
+]

@@ -32,7 +32,7 @@ The pool covers all trie paths touched during block execution:
 - branch nodes, extension nodes, and leaf nodes along every accessed account path
 - branch nodes, extension nodes, and leaf nodes along every accessed storage path
 
-In `test/vectors/test_block_witness.json` the pool contains **207 nodes** for
+In `test/vectors/stateless/test_block_witness.json` the pool contains **207 nodes** for
 block #51632.
 
 ### `codes` — contract bytecodes

@@ -10,6 +10,12 @@ pub fn build(b: *std.Build) void {
     lib_options.addOption(bool, "enable_mcl", false);
     const lib_options_module = lib_options.createModule();
 
+    // Build options for native tools (spec-test-runner, t8n) — crypto enabled for correct precompile behavior
+    const native_lib_options = b.addOptions();
+    native_lib_options.addOption(bool, "enable_blst", true);
+    native_lib_options.addOption(bool, "enable_mcl", true);
+    const native_lib_options_module = native_lib_options.createModule();
+
     // zevm dependency
     const zevm_dep = b.dependency("zevm", .{
         .target = target,
@@ -126,8 +132,8 @@ pub fn build(b: *std.Build) void {
     const run_test_block_cmd = b.addRunArtifact(exe);
     run_test_block_cmd.step.dependOn(b.getInstallStep());
     run_test_block_cmd.addArgs(&.{
-        "test/vectors/test_block.json",
-        "test/vectors/test_block_witness.json",
+        "test/vectors/stateless/test_block.json",
+        "test/vectors/stateless/test_block_witness.json",
     });
     run_test_block_step.dependOn(&run_test_block_cmd.step);
 
@@ -187,4 +193,139 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_exe_tests.step);
     test_step.dependOn(&run_mpt_tests.step);
     test_step.dependOn(&run_db_tests.step);
+
+    // ---------------------------------------------------------------------------
+    // t8n — Ethereum State Transition Tool (execution-spec-tests compatible)
+    //
+    // Implements the geth evm t8n interface:
+    //   t8n --input.alloc A --input.env E --input.txs T --state.fork F \
+    //       --output.alloc out/alloc.json --output.result out/result.json
+    //
+    // Uses the local zevm branch (feat/gap-analysis) for EVM execution.
+    // Links secp256k1 for transaction signing/recovery, OpenSSL for precompiles.
+    // ---------------------------------------------------------------------------
+    const zevm_local_dep = b.dependency("zevm_local", .{
+        .target = target,
+        .optimize = optimize,
+        .blst = false,
+        .mcl = false,
+    });
+
+    const local_primitives = zevm_local_dep.module("primitives");
+    const local_state = zevm_local_dep.module("state");
+    const local_bytecode = zevm_local_dep.module("bytecode");
+    const local_database = zevm_local_dep.module("database");
+    const local_context = zevm_local_dep.module("context");
+    const local_handler = zevm_local_dep.module("handler");
+    const local_precompile = zevm_local_dep.module("precompile");
+
+    // Enable blst and mcl for native tools: override build_options and expose headers
+    local_precompile.addImport("build_options", native_lib_options_module);
+    local_precompile.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+
+    // mpt_builder: standalone trie builder (no external deps)
+    const mpt_builder_mod = b.addModule("mpt_builder", .{
+        .root_source_file = b.path("src/mpt/builder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    const t8n_exe = b.addExecutable(.{
+        .name = "t8n",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/t8n/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",  .module = local_primitives  },
+                .{ .name = "state",       .module = local_state       },
+                .{ .name = "bytecode",    .module = local_bytecode    },
+                .{ .name = "database",    .module = local_database    },
+                .{ .name = "context",     .module = local_context     },
+                .{ .name = "handler",     .module = local_handler     },
+                .{ .name = "precompile",  .module = local_precompile  },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+            },
+        }),
+    });
+    // secp256k1_recovery.h and secp256k1.h are in the Homebrew include path.
+    // OpenSSL headers and libraries are also required by zevm_local's precompile module.
+    t8n_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    t8n_exe.linkSystemLibrary("secp256k1");
+    t8n_exe.linkSystemLibrary("ssl");
+    t8n_exe.linkSystemLibrary("crypto");
+    t8n_exe.linkSystemLibrary("c");
+    t8n_exe.linkSystemLibrary("m");
+    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
+    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    t8n_exe.linkLibCpp();
+
+    b.installArtifact(t8n_exe);
+
+    // zig build t8n [-- --input.alloc ... --state.fork Cancun ...]
+    const run_t8n_step = b.step("t8n", "Run the t8n state transition tool");
+    const run_t8n_cmd = b.addRunArtifact(t8n_exe);
+    run_t8n_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_t8n_cmd.addArgs(args);
+    run_t8n_step.dependOn(&run_t8n_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // spec-test-runner — Native Zig runner for execution-spec-tests state fixtures
+    //
+    // Reads fixture JSONs from test/fixtures/fixtures/state_tests, builds TxInput
+    // from indexed transaction fields + transaction.sender (no ECDSA), calls
+    // transition() directly, and compares stateRoot + logsHash to expected values.
+    //
+    // Usage: zig build spec-tests [-- --fork Cancun --file path/to/fixture.json -x]
+    // Fixtures dir: spec-tests/fixtures/state_tests (download with: zig build fetch-fixtures)
+    // ---------------------------------------------------------------------------
+    const spec_test_exe = b.addExecutable(.{
+        .name = "spec-test-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/spec_test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",  .module = local_primitives  },
+                .{ .name = "state",       .module = local_state       },
+                .{ .name = "bytecode",    .module = local_bytecode    },
+                .{ .name = "database",    .module = local_database    },
+                .{ .name = "context",     .module = local_context     },
+                .{ .name = "handler",     .module = local_handler     },
+                .{ .name = "precompile",  .module = local_precompile  },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+            },
+        }),
+    });
+    spec_test_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    spec_test_exe.linkSystemLibrary("secp256k1");
+    spec_test_exe.linkSystemLibrary("ssl");
+    spec_test_exe.linkSystemLibrary("crypto");
+    spec_test_exe.linkSystemLibrary("c");
+    spec_test_exe.linkSystemLibrary("m");
+    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
+    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    spec_test_exe.linkLibCpp();
+
+    b.installArtifact(spec_test_exe);
+
+    const run_spec_tests_step = b.step("spec-tests", "Run execution-spec-tests state fixtures");
+    const run_spec_tests_cmd = b.addRunArtifact(spec_test_exe);
+    run_spec_tests_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_spec_tests_cmd.addArgs(args);
+    run_spec_tests_step.dependOn(&run_spec_tests_cmd.step);
+
+    // zig build fetch-fixtures — download execution-spec-tests v5.4.0 develop fixtures
+    const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests fixtures");
+    const fetch_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        "rm -rf spec-tests/fixtures && " ++
+        "mkdir -p spec-tests/fixtures && " ++
+        "echo 'Downloading execution-spec-tests v5.4.0 fixtures...' && " ++
+        "curl -fL " ++
+        "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz " ++
+        "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
+        "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
+    });
+    fetch_fixtures_step.dependOn(&fetch_cmd.step);
 }

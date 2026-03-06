@@ -149,3 +149,67 @@ All functions are allocation-free; stack buffers are used throughout.
 - **`EMPTY_TRIE_HASH` short-circuit**: if the storage root is the well-known empty trie hash, `verifyProof` returns `null` immediately without requiring any pool nodes.
 - **`WitnessDatabase`** uses the same flat pool for both account trie and all storage trie traversals — both are included in `witness.nodes`.
 - **No allocations in the verifier**: RLP decoder, nibble decoder, and node decoder all operate as zero-copy views into the original proof bytes.
+
+## t8n — State Transition Tool
+
+The `t8n` binary implements the [geth `evm t8n`](https://github.com/ethereum/go-ethereum/tree/master/cmd/evm) interface, used by [ethereum/execution-spec-tests](https://github.com/ethereum/execution-spec-tests) to verify EVM implementations.
+
+### Build
+
+```bash
+zig build
+# produces zig-out/bin/t8n
+```
+
+### Usage
+
+```
+t8n --input.alloc <alloc.json>  --input.env <env.json>  --input.txs <txs.json> \
+    --state.fork <ForkName>                                                      \
+    [--output.alloc <out.json>] [--output.result <out.json>]                    \
+    [--output.basedir <dir>]
+```
+
+| Flag | Description |
+|------|-------------|
+| `--input.alloc` | Pre-state accounts (address → {balance, nonce, code, storage}) |
+| `--input.env` | Block environment (number, timestamp, gasLimit, baseFee, …) |
+| `--input.txs` | Transactions to execute (RLP hex or JSON array) |
+| `--state.fork` | Fork name: `Frontier` … `Prague` |
+| `--output.alloc` | Write post-state to this path (or `stdout`) |
+| `--output.result` | Write result (stateRoot, txRoot, receipts, …) to this path (or `stdout`) |
+| `--output.basedir` | Directory prefix for output paths |
+| `--state.chainid` | Chain ID (default: `1`) |
+| `--state.reward` | Mining reward in wei, `-1` to disable (default: `-1`) |
+
+### Supported forks
+
+`Frontier`, `Homestead`, `EIP150`, `EIP158`, `Byzantium`, `Constantinople`, `Istanbul`, `Berlin`, `London`, `Paris`, `Shanghai`, `Cancun`, `Prague`
+
+### Example: ETH transfer
+
+```bash
+zig-out/bin/t8n \
+  --input.alloc  test/vectors/t8n/transfer_test/alloc.json \
+  --input.env    test/vectors/t8n/transfer_test/env.json \
+  --input.txs    test/vectors/t8n/transfer_test/txs.json \
+  --state.fork   Cancun \
+  --output.alloc stdout \
+  --output.result stdout
+```
+
+Expected `stateRoot`: `0x392fec13c46687c9795fe81317a91e1d70278b5114c5ca66e0d0245994d4f3de`
+
+### Example: TSTORE/SSTORE contract call
+
+```bash
+zig-out/bin/t8n \
+  --input.alloc  test/vectors/t8n/tstore_test/alloc.json \
+  --input.env    test/vectors/t8n/tstore_test/env.json \
+  --input.txs    test/vectors/t8n/tstore_test/txs.json \
+  --state.fork   Cancun \
+  --output.alloc stdout \
+  --output.result stdout
+```
+
+Expected `stateRoot`: `0xb9e100253042b00aa966b722f6017f627076e5edf25cb781106a7232ac026ef7`
