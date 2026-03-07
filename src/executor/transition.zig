@@ -1005,6 +1005,83 @@ pub fn transition(
         ctx.journaled_state.commitTx();
     }
 
+    // ── EIP-7002 / EIP-7251: post-execution system contract calls (Prague+) ────
+    // After all user txs and withdrawals, call the withdrawal-requests and
+    // consolidation-requests system contracts as the privileged SYSTEM_ADDRESS.
+    // These calls run outside normal gas accounting (no fee deduction, no nonce
+    // increment).  State changes are committed on success and discarded on revert.
+    if (primitives.isEnabledIn(spec, .prague)) {
+        const SYSTEM_ADDRESS: input.Address = .{
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xfe,
+        };
+        // The spec gives the system contract exactly 30M execution gas.
+        // zevm deducts the 21,000 intrinsic base before the frame starts,
+        // so the tx gas_limit must be 30M + 21,000.
+        const SYSTEM_CALL_GAS: u64 = 30_000_000 + 21_000;
+        // EIP-7002 withdrawal requests + EIP-7251 consolidation requests
+        const system_contracts = [_]input.Address{
+            .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5,
+               0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6,
+               0x4c, 0x00, 0x70, 0x02 },
+            .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86,
+               0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5,
+               0x90, 0x00, 0x72, 0x51 },
+        };
+
+        // Bypass normal tx validation for system calls.
+        const saved_nonce   = ctx.cfg.disable_nonce_check;
+        const saved_bal     = ctx.cfg.disable_balance_check;
+        const saved_fee     = ctx.cfg.disable_fee_charge;
+        const saved_basefee = ctx.cfg.disable_base_fee;
+        ctx.cfg.disable_nonce_check   = true;
+        ctx.cfg.disable_balance_check = true;
+        ctx.cfg.disable_fee_charge    = true;
+        ctx.cfg.disable_base_fee      = true;
+
+        for (system_contracts) |sc_addr| {
+            // Per EIP-7002/7251: skip if the contract is not deployed (no code).
+            // Avoids touching the journal for non-existent contracts, which would
+            // corrupt the state root in tests that don't deploy the system contracts.
+            const sc_pre = pre_alloc.get(sc_addr);
+            if (sc_pre == null or sc_pre.?.code.len == 0) continue;
+
+            ctx.tx.caller             = SYSTEM_ADDRESS;
+            ctx.tx.kind               = context_mod.TxKind{ .Call = sc_addr };
+            ctx.tx.gas_limit          = SYSTEM_CALL_GAS;
+            ctx.tx.gas_price          = 0;
+            ctx.tx.gas_priority_fee   = null;
+            ctx.tx.value              = 0;
+            ctx.tx.nonce              = 0;
+            ctx.tx.tx_type            = 0;
+            ctx.tx.data               = null;
+            ctx.tx.access_list        = context_mod.AccessList{ .items = null };
+            ctx.tx.blob_hashes        = null;
+            ctx.tx.authorization_list = null;
+            ctx.tx.chain_id           = chain_id;
+
+            var sc_frames = handler_mod.FrameStack.new();
+            var sc_evm    = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &sc_frames);
+            var sc_result = handler_mod.ExecuteEvm.execute(&sc_evm) catch {
+                ctx.journaled_state.discardTx();
+                continue;
+            };
+            sc_result.logs.deinit(std.heap.c_allocator);
+
+            // System calls must not increment the caller's nonce.
+            // zevm always bumps nonce unconditionally, so patch it back.
+            if (ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS)) |sa| {
+                if (sa.info.nonce > 0) sa.info.nonce -= 1;
+            }
+        }
+
+        ctx.cfg.disable_nonce_check   = saved_nonce;
+        ctx.cfg.disable_balance_check = saved_bal;
+        ctx.cfg.disable_fee_charge    = saved_fee;
+        ctx.cfg.disable_base_fee      = saved_basefee;
+    }
+
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc, &ctx);
 
