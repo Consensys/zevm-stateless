@@ -163,6 +163,29 @@ All functions are allocation-free; stack buffers are used throughout.
 - **`WitnessDatabase`** uses the same flat pool for both account trie and all storage trie traversals — both are included in `witness.nodes`.
 - **No allocations in the verifier**: RLP decoder, nibble decoder, and node decoder all operate as zero-copy views into the original proof bytes.
 
+## Conformance
+
+Tested against [ethereum/execution-spec-tests](https://github.com/ethereum/execution-spec-tests) blockchain tests.
+
+```
+Results: 55247 / 60276 passed  (91%)
+Failed:  48
+Skipped: 4981
+```
+
+### Remaining failures (48 tests)
+
+| Category | Count | Root cause |
+|----------|------:|------------|
+| EIP-7702 auth signature validation | 36 | Invalid `v`/`s` in authorization items should be skipped, currently accepted |
+| Security (`test_tx_selfdestruct_balance_bug`) | 16 | SELFDESTRUCT balance accounting bug across transactions |
+| EIP-6780 SELFDESTRUCT + CREATE2 collision | 8 | Multi-tx / cross-tx collision edge cases |
+| EIP-7918 blob reserve price (Osaka) | 15 | Blob base-fee floor logic not yet implemented |
+| EIP-7002 / EIP-7251 system contracts | 6 | System contract gas-limit error path not handled |
+| EIP-4895 withdrawals + selfdestruct | 2 | SELFDESTRUCT interaction with withdrawal processing |
+
+> All 59,074 execution-spec-tests (`t8n`-based) pass at 100%.
+
 ## t8n — State Transition Tool
 
 The `t8n` binary implements the [geth `evm t8n`](https://github.com/ethereum/go-ethereum/tree/master/cmd/evm) interface, used by [ethereum/execution-spec-tests](https://github.com/ethereum/execution-spec-tests) to verify EVM implementations.
