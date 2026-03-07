@@ -427,6 +427,70 @@ pub fn build(b: *std.Build) void {
     if (b.args) |args| run_spec_tests_cmd.addArgs(args);
     run_spec_tests_step.dependOn(&run_spec_tests_cmd.step);
 
+    // ---------------------------------------------------------------------------
+    // blockchain-test-runner — Ethereum blockchain test fixture runner
+    //
+    // Reads blockchain_tests JSON fixtures, executes each single-block test,
+    // and validates post_state_root, receipts_root, and lastblockhash.
+    //
+    // Usage: zig build blockchain-tests [-- --fork Cancun --file path/to/fixture.json -x -q]
+    // Fixtures dir: spec-tests/fixtures/blockchain_tests
+    // ---------------------------------------------------------------------------
+
+    // blockchain_test runner module
+    const blockchain_test_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/blockchain_test/runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    blockchain_test_runner_mod.addImport("primitives",           local_primitives);
+    blockchain_test_runner_mod.addImport("executor_types",       executor_types_mod);
+    blockchain_test_runner_mod.addImport("executor_transition",  native_executor_transition_mod);
+    blockchain_test_runner_mod.addImport("executor_output",      native_executor_output_mod);
+    blockchain_test_runner_mod.addImport("executor_fork",        executor_fork_mod);
+    blockchain_test_runner_mod.addImport("executor_tx_decode",   native_executor_tx_decode_mod);
+    blockchain_test_runner_mod.addImport("mpt",                  mpt_mod);
+
+    const bc_test_exe = b.addExecutable(.{
+        .name = "blockchain-test-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/blockchain_test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "blockchain_test/runner.zig", .module = blockchain_test_runner_mod },
+            },
+        }),
+    });
+    bc_test_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    bc_test_exe.linkSystemLibrary("secp256k1");
+    bc_test_exe.linkSystemLibrary("ssl");
+    bc_test_exe.linkSystemLibrary("crypto");
+    bc_test_exe.linkSystemLibrary("c");
+    bc_test_exe.linkSystemLibrary("m");
+    bc_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
+    bc_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    bc_test_exe.linkLibCpp();
+
+    b.installArtifact(bc_test_exe);
+
+    const run_bc_tests_step = b.step("blockchain-tests", "Run Ethereum blockchain test fixtures");
+    const run_bc_tests_cmd = b.addRunArtifact(bc_test_exe);
+    run_bc_tests_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_bc_tests_cmd.addArgs(args);
+    run_bc_tests_step.dependOn(&run_bc_tests_cmd.step);
+
     // zig build fetch-fixtures — download execution-spec-tests v5.4.0 develop fixtures
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests fixtures");
     const fetch_cmd = b.addSystemCommand(&.{

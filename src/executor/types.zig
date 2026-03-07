@@ -56,6 +56,8 @@ pub const Env = struct {
     parent_excess_blob_gas: ?u64 = null,
     parent_blob_gas_used: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
+    /// EIP-2935: parent block hash for history storage contract (Prague+).
+    parent_hash: ?Hash = null,
     block_hashes: []BlockHashEntry = &.{},
     withdrawals: []Withdrawal = &.{},
 };
@@ -69,6 +71,10 @@ pub const AuthorizationItem = struct {
     nonce: u64 = 0,
     /// The recovered signer (authority). If null, treated as Invalid.
     signer: ?Address = null,
+    /// Signature fields (needed for tx signing hash and signer recovery).
+    y_parity: u256 = 0,
+    r: u256 = 0,
+    s: u256 = 0,
 };
 
 pub const TxInput = struct {

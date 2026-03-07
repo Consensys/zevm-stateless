@@ -46,6 +46,8 @@ pub const Receipt = struct {
     logs: []Log,
     logs_bloom: bloom.Bloom,
     status: u8,
+    /// Pre-Byzantium (EIP-658): intermediate state root after this tx. Null = post-Byzantium.
+    state_root: ?[32]u8 = null,
     effective_gas_price: u128,
     blob_gas_used: ?u64 = null,
     blob_gas_price: ?u128 = null,
@@ -143,6 +145,45 @@ fn rlpAccessList(alloc: std.mem.Allocator, al: []const input.AccessListEntry) ![
     return rlp.encodeList(alloc, outer_items.items);
 }
 
+/// Encode blob versioned hashes to RLP list of 32-byte items (EIP-4844).
+fn rlpBlobVersionedHashes(alloc: std.mem.Allocator, hashes: []const input.Hash) ![]u8 {
+    var items = std.ArrayListUnmanaged([]const u8){};
+    defer items.deinit(alloc);
+    for (hashes) |h| try items.append(alloc, try rlp.encodeBytes(alloc, &h));
+    return rlp.encodeList(alloc, items.items);
+}
+
+/// Encode EIP-7702 authorization list to RLP (full wire form: [chain_id, addr, nonce, yParity, r, s]).
+/// Used in both the transaction signing hash and the transaction hash.
+fn rlpAuthorizationList(alloc: std.mem.Allocator, auth_list: []const input.AuthorizationItem) ![]u8 {
+    var outer = std.ArrayListUnmanaged([]const u8){};
+    defer outer.deinit(alloc);
+    for (auth_list) |item| {
+        const items = [_][]const u8{
+            try rlp.encodeU256(alloc, item.chain_id),
+            try rlp.encodeBytes(alloc, &item.address),
+            try rlp.encodeU64(alloc, item.nonce),
+            try rlp.encodeU256(alloc, item.y_parity),
+            try rlp.encodeU256(alloc, item.r),
+            try rlp.encodeU256(alloc, item.s),
+        };
+        try outer.append(alloc, try rlp.encodeList(alloc, &items));
+    }
+    return rlp.encodeList(alloc, outer.items);
+}
+
+/// Compute the signing hash for a single EIP-7702 authorization item.
+/// hash = keccak256(0x05 || rlp([chain_id, address, nonce]))
+fn authorizationSigningHash(alloc: std.mem.Allocator, item: *const input.AuthorizationItem) ![32]u8 {
+    const fields = [_][]const u8{
+        try rlp.encodeU256(alloc, item.chain_id),
+        try rlp.encodeBytes(alloc, &item.address),
+        try rlp.encodeU64(alloc, item.nonce),
+    };
+    const payload = try rlp.concat(alloc, &.{ &.{0x05}, try rlp.encodeList(alloc, &fields) });
+    return rlp.keccak256(payload);
+}
+
 /// Encode tx.to as RLP (empty bytes for CREATE, 20-byte address for CALL).
 fn rlpTo(alloc: std.mem.Allocator, to: ?input.Address) ![]u8 {
     if (to) |addr| return rlp.encodeBytes(alloc, &addr);
@@ -209,6 +250,39 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
             };
             break :blk try rlp.concat(alloc, &.{ &.{0x02}, try rlp.encodeList(alloc, &items) });
         },
+        3 => blk: {
+            const bvh_enc = try rlpBlobVersionedHashes(alloc, tx.blob_versioned_hashes);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                try rlp.encodeU128(alloc, tx.max_fee_per_blob_gas orelse 0),
+                bvh_enc,
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x03}, try rlp.encodeList(alloc, &items) });
+        },
+        4 => blk: {
+            const auth_enc = try rlpAuthorizationList(alloc, tx.authorization_list);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                auth_enc,
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x04}, try rlp.encodeList(alloc, &items) });
+        },
         else => return error.UnsupportedTxType,
     };
 
@@ -272,6 +346,45 @@ fn txHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![3
                 try rlp.encodeU256(alloc, s),
             };
             break :blk try rlp.concat(alloc, &.{ &.{0x02}, try rlp.encodeList(alloc, &items) });
+        },
+        3 => blk: {
+            const bvh_enc = try rlpBlobVersionedHashes(alloc, tx.blob_versioned_hashes);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                try rlp.encodeU128(alloc, tx.max_fee_per_blob_gas orelse 0),
+                bvh_enc,
+                try rlp.encodeU256(alloc, v), // yParity
+                try rlp.encodeU256(alloc, r),
+                try rlp.encodeU256(alloc, s),
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x03}, try rlp.encodeList(alloc, &items) });
+        },
+        4 => blk: {
+            const auth_enc = try rlpAuthorizationList(alloc, tx.authorization_list);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                auth_enc,
+                try rlp.encodeU256(alloc, v), // yParity
+                try rlp.encodeU256(alloc, r),
+                try rlp.encodeU256(alloc, s),
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x04}, try rlp.encodeList(alloc, &items) });
         },
         else => return error.UnsupportedTxType,
     };
@@ -453,13 +566,55 @@ fn effectiveGasPrice(tx: *const input.TxInput, base_fee: u64) u128 {
 
 pub fn transition(
     arena: std.mem.Allocator,
-    pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     env: input.Env,
     txs: []input.TxInput,
     spec: primitives.SpecId,
     chain_id: u64,
     reward: i64, // mining reward in wei; -1 = disabled
 ) !TransitionResult {
+    // ── EIP-4788: apply beacon block root system call pre-state (Cancun+) ────
+    // Mutate a mutable copy of pre_alloc to store (timestamp, root) in the
+    // beacon roots contract storage before building the DB.
+    var pre_alloc = pre_alloc_in;
+    if (primitives.isEnabledIn(spec, .cancun)) {
+        if (env.parent_beacon_block_root) |root| {
+            const BEACON_ROOTS_ADDRESS: input.Address = .{
+                0x00, 0x0F, 0x3d, 0xf6, 0xD7, 0x32, 0x80, 0x7E, 0xf1, 0x31,
+                0x9f, 0xB7, 0xB8, 0xBb, 0x85, 0x22, 0xd0, 0xBe, 0xac, 0x02,
+            };
+            const HISTORY_BUFFER_LENGTH: u256 = 8191;
+            const ts: u256 = env.timestamp;
+            const ts_idx = ts % HISTORY_BUFFER_LENGTH;
+            const root_idx = ts_idx + HISTORY_BUFFER_LENGTH;
+            var root_val: u256 = 0;
+            for (root) |b| root_val = (root_val << 8) | b;
+
+            const entry = try pre_alloc.getOrPut(arena, BEACON_ROOTS_ADDRESS);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            try entry.value_ptr.*.storage.put(arena, ts_idx,   ts);
+            try entry.value_ptr.*.storage.put(arena, root_idx, root_val);
+        }
+    }
+
+    // ── EIP-2935: apply block hash history contract system call (Prague+) ──────
+    // At the start of each block, store parent_hash at slot (block_number - 1) % 8192.
+    if (primitives.isEnabledIn(spec, .prague)) {
+        if (env.parent_hash) |parent_hash| {
+            const HISTORY_STORAGE_ADDRESS: input.Address = .{
+                0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb,
+                0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35,
+            };
+            const HISTORY_BUFFER_LENGTH: u256 = 8192;
+            const slot: u256 = if (env.number > 0) (env.number - 1) % HISTORY_BUFFER_LENGTH else 0;
+            var hash_val: u256 = 0;
+            for (parent_hash) |b| hash_val = (hash_val << 8) | b;
+            const entry = try pre_alloc.getOrPut(arena, HISTORY_STORAGE_ADDRESS);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            try entry.value_ptr.*.storage.put(arena, slot, hash_val);
+        }
+    }
+
     // ── Build DB and EVM context ──────────────────────────────────────────────
     const db = try buildDb(arena, pre_alloc, env.block_hashes);
     // Context takes DB by value (moves into journal)
@@ -573,16 +728,26 @@ pub fn transition(
         if (tx.type == 4 and tx.authorization_list.len > 0) {
             var auth_list = std.ArrayList(context_mod.Either){};
             for (tx.authorization_list) |ai| {
+                // Recover the authorization signer if not already set.
+                const authority: context_mod.RecoveredAuthority = blk: {
+                    if (ai.signer) |s| break :blk context_mod.RecoveredAuthority{ .Valid = s };
+                    // keccak256(0x05 || rlp([chain_id, address, nonce]))
+                    const auth_hash = authorizationSigningHash(arena, &ai) catch break :blk context_mod.RecoveredAuthority.Invalid;
+                    const recid: u8 = if (ai.y_parity == 0) 0 else 1;
+                    var auth_sig: [64]u8 = undefined;
+                    std.mem.writeInt(u256, auth_sig[0..32], ai.r, .big);
+                    std.mem.writeInt(u256, auth_sig[32..64], ai.s, .big);
+                    const auth_ctx = secp_wrapper.getContext() orelse break :blk context_mod.RecoveredAuthority.Invalid;
+                    const signer = auth_ctx.ecrecover(auth_hash, auth_sig, recid) orelse break :blk context_mod.RecoveredAuthority.Invalid;
+                    break :blk context_mod.RecoveredAuthority{ .Valid = signer };
+                };
                 const recovered = context_mod.RecoveredAuthorization.newUnchecked(
                     context_mod.Authorization{
                         .chain_id = ai.chain_id,
                         .address = ai.address,
                         .nonce = ai.nonce,
                     },
-                    if (ai.signer) |s|
-                        context_mod.RecoveredAuthority{ .Valid = s }
-                    else
-                        context_mod.RecoveredAuthority.Invalid,
+                    authority,
                 );
                 auth_list.append(std.heap.c_allocator, context_mod.Either{ .Right = recovered }) catch {};
             }

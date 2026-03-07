@@ -151,8 +151,14 @@ fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: transition.Receipt) ![]u8
         try log_items.append(alloc, try rlp.encodeList(alloc, &log_parts));
     }
     const bloom_bytes: []const u8 = &receipt.logs_bloom;
+    // Pre-Byzantium (EIP-658): first field is 32-byte stateRoot.
+    // Post-Byzantium: first field is 1-byte status (0x01 = success, 0x00 = failure).
+    const first_field = if (receipt.state_root) |sr|
+        try rlp.encodeBytes(alloc, &sr)
+    else
+        try rlp.encodeBytes(alloc, if (receipt.status == 1) &.{0x01} else &.{});
     const parts = [_][]const u8{
-        try rlp.encodeBytes(alloc, if (receipt.status == 1) &.{0x01} else &.{}),
+        first_field,
         try rlp.encodeU64(alloc, receipt.cumulative_gas_used),
         try rlp.encodeBytes(alloc, bloom_bytes),
         try rlp.encodeList(alloc, log_items.items),

@@ -395,14 +395,19 @@ fn nextAuthList(
         if (addr_bytes.len != 20) return error.InvalidTx;
         var auth_addr: types.Address = undefined;
         @memcpy(&auth_addr, addr_bytes);
-        const auth_nonce = try decodeUint64(try nextBytesView(&ep));
-        // remaining fields (yParity, r, s) are for signer recovery — skipped here
+        const auth_nonce    = try decodeUint64(try nextBytesView(&ep));
+        const auth_y_parity = try decodeUint256(try nextBytesView(&ep));
+        const auth_r        = try decodeUint256(try nextBytesView(&ep));
+        const auth_s        = try decodeUint256(try nextBytesView(&ep));
 
         try items.append(alloc, .{
             .chain_id = auth_chain_id,
             .address  = auth_addr,
             .nonce    = auth_nonce,
-            .signer   = null,
+            .signer   = null, // recovered later in transition()
+            .y_parity = auth_y_parity,
+            .r        = auth_r,
+            .s        = auth_s,
         });
     }
     return items.toOwnedSlice(alloc);
