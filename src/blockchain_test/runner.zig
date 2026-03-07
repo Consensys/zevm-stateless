@@ -80,7 +80,7 @@ pub fn runFixture(
             }
         }
 
-        // Must have exactly one block.
+        // Parse the blocks array.
         const blocks_arr = blk: {
             const bv = test_obj.get("blocks") orelse { stats.skipped += 1; continue; };
             break :blk switch (bv) {
@@ -88,29 +88,14 @@ pub fn runFixture(
                 else   => { stats.skipped += 1; continue; },
             };
         };
-        if (blocks_arr.items.len != 1) {
-            stats.skipped += 1;
-            continue;
-        }
-        const b0 = switch (blocks_arr.items[0]) {
-            .object => |o| o,
-            else    => { stats.skipped += 1; continue; },
-        };
-
-        // Expected values from blockHeader JSON.
-        const bh = switch (b0.get("blockHeader") orelse { stats.skipped += 1; continue; }) {
-            .object => |o| o,
-            else    => { stats.skipped += 1; continue; },
-        };
-        const expected_state_root    = hexToHash(getString(bh, "stateRoot")  orelse "") catch [_]u8{0} ** 32;
-        const expected_receipts_root = hexToHash(getString(bh, "receiptTrie") orelse "") catch [_]u8{0} ** 32;
-        const expected_block_hash    = hexToHash(getString(bh, "hash")        orelse "") catch [_]u8{0} ** 32;
+        if (blocks_arr.items.len == 0) { stats.skipped += 1; continue; }
 
         const genesis_bh = switch (test_obj.get("genesisBlockHeader") orelse { stats.skipped += 1; continue; }) {
             .object => |o| o,
             else    => { stats.skipped += 1; continue; },
         };
-        const genesis_hash = hexToHash(getString(genesis_bh, "hash") orelse "") catch [_]u8{0} ** 32;
+        const genesis_number = if (genesis_bh.get("number")) |v| jsonU64(v) catch 0 else 0;
+        const genesis_hash   = hexToHash(getString(genesis_bh, "hash") orelse "") catch [_]u8{0} ** 32;
 
         const expected_lastblockhash = blk: {
             const lv = test_obj.get("lastblockhash") orelse break :blk [_]u8{0} ** 32;
@@ -136,113 +121,121 @@ pub fn runFixture(
         const pre_val = test_obj.get("pre") orelse { stats.skipped += 1; continue; };
         const pre_alloc = parseAllocFromValue(alloc, pre_val) catch { stats.skipped += 1; continue; };
 
-        // Decode block RLP → raw transaction bytes.
-        const rlp_hex = switch (b0.get("rlp") orelse { stats.skipped += 1; continue; }) {
-            .string => |s| s,
-            else    => { stats.skipped += 1; continue; },
-        };
-        const block_bytes = hexToSlice(alloc, rlp_hex) catch { stats.skipped += 1; continue; };
-        const raw_txs = decodeTxsFromBlock(alloc, block_bytes) catch { stats.skipped += 1; continue; };
-
-        // Build a block_hashes table: include genesis block as the parent entry.
-        // This lets BLOCKHASH(genesis_number) work correctly for tests that check it.
-        const genesis_bh_for_env = switch (test_obj.get("genesisBlockHeader") orelse .null) {
-            .object => |o| o,
-            else    => null,
-        };
+        // ── Chain state threaded across blocks ───────────────────────────────
+        var chain_alloc = pre_alloc;
         var block_hashes_list = std.ArrayListUnmanaged(executor_types.BlockHashEntry){};
-        if (genesis_bh_for_env) |gbh| {
-            const gbh_number = if (gbh.get("number")) |v| jsonU64(v) catch 0 else 0;
-            const gbh_hash   = hexToHash(getString(gbh, "hash") orelse "") catch [_]u8{0} ** 32;
-            try block_hashes_list.append(alloc, .{ .number = gbh_number, .hash = gbh_hash });
-        }
+        try block_hashes_list.append(alloc, .{ .number = genesis_number, .hash = genesis_hash });
+        var last_valid_hash = genesis_hash;
+        var test_failed = false;
 
-        // Build execution environment from blockHeader + withdrawals.
-        const env = buildEnv(alloc, bh, b0, block_hashes_list.items) catch { stats.skipped += 1; continue; };
-
-        // Decode transactions.
-        const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
-            if (!quiet) std.debug.print("FAIL  {s}/{s}  tx-decode: {}\n", .{ rel_path, test_name, err });
-            stats.failed += 1;
-            if (stop_on_fail) return false;
-            continue;
-        };
-
-        // Execute the block.
-        const reward = executor_fork.blockReward(spec);
-        const result = executor_transition.transition(
-            alloc, pre_alloc, env, txs, spec, fixture_chain_id, reward,
-        ) catch |err| {
-            // Execution error: lastblockhash should be genesis hash.
-            const lbh_ok = std.mem.eql(u8, &genesis_hash, &expected_lastblockhash);
-            if (lbh_ok) {
-                stats.passed += 1;
-                if (!quiet) std.debug.print("PASS  {s}/{s}  (exec-err, lastblockhash=genesis)\n", .{ rel_path, test_name });
-            } else {
-                if (!quiet) std.debug.print(
-                    "FAIL  {s}/{s}  exec={}\n  lastblockhash got:  0x{x}\n  lastblockhash want: 0x{x}\n",
-                    .{ rel_path, test_name, err, genesis_hash, expected_lastblockhash },
-                );
-                stats.failed += 1;
-            }
-            if (stop_on_fail and stats.failed > 0) return false;
-            continue;
-        };
-
-        // Compute post-state and receipts roots.
-        const post_state_root = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
-
-        // Pre-Byzantium (EIP-658 not yet active): receipts encode stateRoot instead of status.
-        // The intermediate state_root = state after txs but BEFORE mining reward.
-        // Compute by temporarily subtracting the block reward from coinbase.
-        if (!primitives.isEnabledIn(spec, .byzantium)) {
-            const intermediate_root = blk: {
-                if (reward > 0) {
-                    const reward_u256: u256 = @intCast(reward);
-                    if (result.alloc.getPtr(env.coinbase)) |acct| {
-                        const orig = acct.balance;
-                        acct.balance -|= reward_u256;
-                        const iroot = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
-                        acct.balance = orig;
-                        break :blk iroot;
-                    }
-                }
-                break :blk post_state_root;
+        for (blocks_arr.items) |block_val| {
+            const block = switch (block_val) {
+                .object => |o| o,
+                else    => continue,
             };
-            for (result.receipts) |*r| r.state_root = intermediate_root;
+
+            // expectException: this block is expected to be invalid — freeze state, don't update last_valid_hash.
+            const expect_exception = blk: {
+                const ev = block.get("expectException") orelse break :blk false;
+                break :blk switch (ev) {
+                    .string => |s| s.len > 0,
+                    else    => false,
+                };
+            };
+            if (expect_exception) continue;
+
+            // blockHeader must be present for a valid block.
+            const bh = switch (block.get("blockHeader") orelse continue) {
+                .object => |o| o,
+                else    => continue,
+            };
+            const expected_block_state_root    = hexToHash(getString(bh, "stateRoot")   orelse "") catch [_]u8{0} ** 32;
+            const expected_block_receipts_root = hexToHash(getString(bh, "receiptTrie") orelse "") catch [_]u8{0} ** 32;
+            const expected_block_hash          = hexToHash(getString(bh, "hash")        orelse "") catch [_]u8{0} ** 32;
+
+            // Decode block RLP → raw transaction bytes.
+            const rlp_hex = switch (block.get("rlp") orelse continue) {
+                .string => |s| s,
+                else    => continue,
+            };
+            const block_bytes = hexToSlice(alloc, rlp_hex) catch continue;
+            const raw_txs     = decodeTxsFromBlock(alloc, block_bytes) catch continue;
+
+            // Build execution environment from blockHeader + accumulated block hashes.
+            const env = buildEnv(alloc, bh, block, block_hashes_list.items) catch continue;
+
+            // Decode transactions.
+            const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
+                if (!quiet) std.debug.print("FAIL  {s}/{s}  tx-decode (block {}): {}\n",
+                    .{ rel_path, test_name, env.number, err });
+                test_failed = true;
+                break;
+            };
+
+            // Execute the block. An execution error means the block is invalid — freeze state.
+            const reward = executor_fork.blockReward(spec);
+            const result = executor_transition.transition(
+                alloc, chain_alloc, env, txs, spec, fixture_chain_id, reward,
+            ) catch continue;
+
+            // Compute post-state root.
+            const post_state_root = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
+
+            // Pre-Byzantium (EIP-658 not yet active): receipts encode intermediate stateRoot
+            // (state after txs but before mining reward).
+            if (!primitives.isEnabledIn(spec, .byzantium)) {
+                const intermediate_root = intermediate: {
+                    if (reward > 0) {
+                        const reward_u256: u256 = @intCast(reward);
+                        if (result.alloc.getPtr(env.coinbase)) |acct| {
+                            const orig = acct.balance;
+                            acct.balance -|= reward_u256;
+                            const iroot = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
+                            acct.balance = orig;
+                            break :intermediate iroot;
+                        }
+                    }
+                    break :intermediate post_state_root;
+                };
+                for (result.receipts) |*r| r.state_root = intermediate_root;
+            }
+
+            const receipts_root = executor_output.computeReceiptsRoot(alloc, result.receipts) catch [_]u8{0} ** 32;
+
+            const state_ok    = std.mem.eql(u8, &post_state_root, &expected_block_state_root);
+            const receipts_ok = std.mem.eql(u8, &receipts_root,   &expected_block_receipts_root);
+
+            if (state_ok and receipts_ok) {
+                // Commit: thread state to next block.
+                chain_alloc     = result.alloc;
+                last_valid_hash = expected_block_hash;
+                try block_hashes_list.append(alloc, .{ .number = env.number, .hash = expected_block_hash });
+            } else {
+                test_failed = true;
+                if (!quiet) {
+                    if (!state_ok) std.debug.print(
+                        "FAIL  {s}/{s}  stateRoot (block {})\n  got:  0x{x}\n  want: 0x{x}\n",
+                        .{ rel_path, test_name, env.number, post_state_root, expected_block_state_root },
+                    );
+                    if (!receipts_ok) std.debug.print(
+                        "FAIL  {s}/{s}  receiptTrie (block {})\n  got:  0x{x}\n  want: 0x{x}\n",
+                        .{ rel_path, test_name, env.number, receipts_root, expected_block_receipts_root },
+                    );
+                }
+            }
         }
 
-        const receipts_root = executor_output.computeReceiptsRoot(alloc, result.receipts) catch [_]u8{0} ** 32;
-
-        const state_ok    = std.mem.eql(u8, &post_state_root, &expected_state_root);
-        const receipts_ok = std.mem.eql(u8, &receipts_root,   &expected_receipts_root);
-
-        // lastblockhash: block hash if both roots match, genesis hash otherwise.
-        const computed_lastblockhash = if (state_ok and receipts_ok)
-            expected_block_hash
-        else
-            genesis_hash;
-        const lbh_ok = std.mem.eql(u8, &computed_lastblockhash, &expected_lastblockhash);
-
-        if (state_ok and receipts_ok and lbh_ok) {
+        // Validate lastblockhash = hash of last successfully committed block.
+        const lbh_ok = std.mem.eql(u8, &last_valid_hash, &expected_lastblockhash);
+        if (!test_failed and lbh_ok) {
             stats.passed += 1;
             if (!quiet) std.debug.print("PASS  {s}/{s}\n", .{ rel_path, test_name });
         } else {
             stats.failed += 1;
-            if (!quiet) {
-                if (!state_ok) std.debug.print(
-                    "FAIL  {s}/{s}  stateRoot\n  got:  0x{x}\n  want: 0x{x}\n",
-                    .{ rel_path, test_name, post_state_root, expected_state_root },
-                );
-                if (!receipts_ok) std.debug.print(
-                    "FAIL  {s}/{s}  receiptTrie\n  got:  0x{x}\n  want: 0x{x}\n",
-                    .{ rel_path, test_name, receipts_root, expected_receipts_root },
-                );
-                if (!lbh_ok) std.debug.print(
-                    "FAIL  {s}/{s}  lastblockhash\n  got:  0x{x}\n  want: 0x{x}\n",
-                    .{ rel_path, test_name, computed_lastblockhash, expected_lastblockhash },
-                );
-            }
+            if (!quiet and !lbh_ok) std.debug.print(
+                "FAIL  {s}/{s}  lastblockhash\n  got:  0x{x}\n  want: 0x{x}\n",
+                .{ rel_path, test_name, last_valid_hash, expected_lastblockhash },
+            );
             if (stop_on_fail) return false;
         }
     }
