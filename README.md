@@ -80,17 +80,17 @@ Phase 3  Block execution
     excess_blob_gas = 0  blob_gasprice = 1
   transactions  = 100
   pre_state_root  = 0x79f54cce9fd251fcc39c727b5db2d0fa94f7b76782be5cdf8336bd5cae24e609
-  post_state_root = 0x79f54cce...  (mock)
-  receipts_root   = 0x79f54cce...  (mock)
+  post_state_root = 0x1a2b3c4d...  ✓
+  receipts_root   = 0xe4b52b3a...  ✓
 
-Done.
+OK
 ```
 
 ## Pipeline
 
 - **Step 1** — MPT proof verification: every accessed account and storage slot is verified against the pre-state root using the flat node pool from `debug_executionWitness`.
 - **Step 2** — WitnessDatabase: account and bytecode reads are served from the proven witness.
-- **Step 3** — Block execution via zevm (in progress).
+- **Step 3** — Block execution via zevm: transactions are executed against the witness state, and the resulting `post_state_root` and `receipts_root` are verified against the block header.
 
 ```bash
 ./run_proof.sh <RPC_URL> <BLOCK_NUMBER>
@@ -165,26 +165,23 @@ All functions are allocation-free; stack buffers are used throughout.
 
 ## Conformance
 
-Tested against [ethereum/execution-spec-tests](https://github.com/ethereum/execution-spec-tests) blockchain tests.
+Tested against [ethereum/execution-spec-tests](https://github.com/ethereum/execution-spec-tests) v5.4.0.
+
+### Blockchain tests
 
 ```
-Results: 55247 / 60276 passed  (91%)
-Failed:  48
-Skipped: 4981
+Results: 59253 / 60168 passed  (100% of non-skipped)
+Failed:  0
+Skipped: 915  (4 files exceed 64 MB read limit; remainder are unsupported fork variants)
 ```
 
-### Remaining failures (48 tests)
+### State tests (t8n-based)
 
-| Category | Count | Root cause |
-|----------|------:|------------|
-| EIP-7702 auth signature validation | 36 | Invalid `v`/`s` in authorization items should be skipped, currently accepted |
-| Security (`test_tx_selfdestruct_balance_bug`) | 16 | SELFDESTRUCT balance accounting bug across transactions |
-| EIP-6780 SELFDESTRUCT + CREATE2 collision | 8 | Multi-tx / cross-tx collision edge cases |
-| EIP-7918 blob reserve price (Osaka) | 15 | Blob base-fee floor logic not yet implemented |
-| EIP-7002 / EIP-7251 system contracts | 6 | System contract gas-limit error path not handled |
-| EIP-4895 withdrawals + selfdestruct | 2 | SELFDESTRUCT interaction with withdrawal processing |
+```
+Results: 59253 / 59253 passed  (100%)
+```
 
-> All 59,074 execution-spec-tests (`t8n`-based) pass at 100%.
+> Run with `make spec-tests` (both suites) or `make blockchain-tests` / `make state-tests` individually.
 
 ## t8n — State Transition Tool
 

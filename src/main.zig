@@ -205,7 +205,7 @@ fn run() !void {
         std.debug.print("  (no account keys in witness)\n", .{});
     }
 
-    // ── Phase 3: Block execution (mocked) ─────────────────────────────────────
+    // ── Phase 3: Block execution ───────────────────────────────────────────────
     std.debug.print("\nPhase 3  Block execution\n", .{});
     {
         const block_env = executor.blockEnvFromHeader(si.header);
@@ -222,16 +222,37 @@ fn run() !void {
                 .{ b.excess_blob_gas, b.blob_gasprice });
         }
 
-        std.debug.print("  transactions  = {d}\n",   .{si.transactions.len});
+        std.debug.print("  transactions  = {d}\n", .{si.transactions.len});
 
         const proof_out = executor.executeBlock(allocator, si) catch |err| {
             std.debug.print("  FAIL → {}\n", .{err});
             std.process.exit(1);
         };
+
         std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
-        std.debug.print("  post_state_root = 0x{x}\n", .{proof_out.post_state_root});
-        std.debug.print("  receipts_root   = 0x{x}\n", .{proof_out.receipts_root});
+
+        const state_ok    = std.mem.eql(u8, &proof_out.post_state_root, &si.header.state_root);
+        const receipts_ok = std.mem.eql(u8, &proof_out.receipts_root,   &si.header.receipts_root);
+
+        if (state_ok) {
+            std.debug.print("  post_state_root = 0x{x}  ✓\n", .{proof_out.post_state_root});
+        } else {
+            std.debug.print("  post_state_root = 0x{x}  ✗  MISMATCH\n", .{proof_out.post_state_root});
+            std.debug.print("  expected        = 0x{x}\n",               .{si.header.state_root});
+        }
+
+        if (receipts_ok) {
+            std.debug.print("  receipts_root   = 0x{x}  ✓\n", .{proof_out.receipts_root});
+        } else {
+            std.debug.print("  receipts_root   = 0x{x}  ✗  MISMATCH\n", .{proof_out.receipts_root});
+            std.debug.print("  expected        = 0x{x}\n",               .{si.header.receipts_root});
+        }
+
+        if (!state_ok or !receipts_ok) {
+            std.debug.print("\nFAIL\n", .{});
+            std.process.exit(1);
+        }
     }
 
-    std.debug.print("\nDone.\n", .{});
+    std.debug.print("\nOK\n", .{});
 }
