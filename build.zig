@@ -393,7 +393,7 @@ pub fn build(b: *std.Build) void {
     // from indexed transaction fields + transaction.sender (no ECDSA), calls
     // transition() directly, and compares stateRoot + logsHash to expected values.
     //
-    // Usage: zig build spec-tests [-- --fork Cancun --file path/to/fixture.json -x]
+    // Usage: zig build state-tests [-- --fork Cancun --file path/to/fixture.json -x]
     // Fixtures dir: spec-tests/fixtures/state_tests (download with: zig build fetch-fixtures)
     // ---------------------------------------------------------------------------
     const spec_test_exe = b.addExecutable(.{
@@ -430,11 +430,11 @@ pub fn build(b: *std.Build) void {
 
     b.installArtifact(spec_test_exe);
 
-    const run_spec_tests_step = b.step("spec-tests", "Run execution-spec-tests state fixtures");
+    const run_state_tests_step = b.step("state-tests", "Run execution-spec-tests state fixtures");
     const run_spec_tests_cmd = b.addRunArtifact(spec_test_exe);
     run_spec_tests_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_spec_tests_cmd.addArgs(args);
-    run_spec_tests_step.dependOn(&run_spec_tests_cmd.step);
+    run_state_tests_step.dependOn(&run_spec_tests_cmd.step);
 
     // ---------------------------------------------------------------------------
     // blockchain-test-runner — Ethereum blockchain test fixture runner
@@ -499,6 +499,30 @@ pub fn build(b: *std.Build) void {
     run_bc_tests_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_bc_tests_cmd.addArgs(args);
     run_bc_tests_step.dependOn(&run_bc_tests_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // all-spec-tests-runner — combined state + blockchain spec-test runner
+    //
+    // Spawns spec-test-runner and blockchain-test-runner as subprocesses and
+    // prints a unified summary across both suites.
+    //
+    // Usage: zig build spec-tests [-- --fork Cancun -q]
+    // ---------------------------------------------------------------------------
+    const all_spec_exe = b.addExecutable(.{
+        .name = "all-spec-tests-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/all_spec_tests_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(all_spec_exe);
+
+    const run_spec_tests_step = b.step("spec-tests", "Run all spec-tests: state + blockchain");
+    const run_all_spec_cmd = b.addRunArtifact(all_spec_exe);
+    run_all_spec_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_all_spec_cmd.addArgs(args);
+    run_spec_tests_step.dependOn(&run_all_spec_cmd.step);
 
     // ---------------------------------------------------------------------------
     // hive-rlp — Hive consume-rlp execution client

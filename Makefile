@@ -5,7 +5,7 @@ ZIG_BUILD_CMD = zig build
 
 ARGS ?=
 
-.PHONY: spec-tests fetch-fixtures
+.PHONY: spec-tests state-tests blockchain-tests fetch-fixtures
 
 # Download execution-spec-tests fixtures; marker file tracks successful download
 $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION):
@@ -19,9 +19,20 @@ $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION):
 
 fetch-fixtures: $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION)
 
-# Build and run spec tests
+# Build and run all spec tests (state + blockchain), unified summary
 spec-tests: $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION)
-	@echo "Building spec-test-runner..."
 	@$(ZIG_BUILD_CMD) install
-	@echo "Running spec tests..."
+	@./zig-out/bin/all-spec-tests-runner \
+		--state-fixtures $(SPEC_TEST_DIR)/fixtures/state_tests \
+		--blockchain-fixtures $(SPEC_TEST_DIR)/fixtures/blockchain_tests \
+		$(ARGS)
+
+# State tests only
+state-tests: $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION)
+	@$(ZIG_BUILD_CMD) install
 	@./zig-out/bin/spec-test-runner --fixtures $(SPEC_TEST_DIR)/fixtures/state_tests $(ARGS)
+
+# Blockchain tests only
+blockchain-tests: $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION)
+	@$(ZIG_BUILD_CMD) install
+	@./zig-out/bin/blockchain-test-runner --fixtures $(SPEC_TEST_DIR)/fixtures/blockchain_tests $(ARGS)
