@@ -181,24 +181,8 @@ pub fn runFixture(
             // Compute post-state root.
             const post_state_root = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
 
-            // Pre-Byzantium (EIP-658 not yet active): receipts encode intermediate stateRoot
-            // (state after txs but before mining reward).
-            if (!primitives.isEnabledIn(spec, .byzantium)) {
-                const intermediate_root = intermediate: {
-                    if (reward > 0) {
-                        const reward_u256: u256 = @intCast(reward);
-                        if (result.alloc.getPtr(env.coinbase)) |acct| {
-                            const orig = acct.balance;
-                            acct.balance -|= reward_u256;
-                            const iroot = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
-                            acct.balance = orig;
-                            break :intermediate iroot;
-                        }
-                    }
-                    break :intermediate post_state_root;
-                };
-                for (result.receipts) |*r| r.state_root = intermediate_root;
-            }
+            // Pre-Byzantium: per-tx state roots are now computed inside transition().
+            // Each receipt already has .state_root set correctly.
 
             const receipts_root = executor_output.computeReceiptsRoot(alloc, result.receipts) catch [_]u8{0} ** 32;
 

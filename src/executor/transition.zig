@@ -17,41 +17,13 @@ const bloom = @import("bloom.zig");
 const rlp = @import("executor_rlp_encode");
 const precompile_mod = @import("precompile");
 const secp_wrapper = precompile_mod.secp256k1_wrapper;
+const output_mod = @import("executor_output");
 
-// ─── Output types ─────────────────────────────────────────────────────────────
+// ─── Output types (re-exported from executor_types) ───────────────────────────
 
-pub const Log = struct {
-    address: input.Address,
-    topics: []input.Hash,
-    data: []const u8,
-    block_number: u64,
-    tx_hash: input.Hash,
-    tx_index: u64,
-    block_hash: input.Hash,
-    log_index: u64,
-    removed: bool = false,
-};
-
-pub const Receipt = struct {
-    type: u8,
-    tx_hash: input.Hash,
-    tx_index: u64,
-    block_hash: input.Hash,
-    block_number: u64,
-    from: input.Address,
-    to: ?input.Address,
-    cumulative_gas_used: u64,
-    gas_used: u64,
-    contract_address: ?input.Address,
-    logs: []Log,
-    logs_bloom: bloom.Bloom,
-    status: u8,
-    /// Pre-Byzantium (EIP-658): intermediate state root after this tx. Null = post-Byzantium.
-    state_root: ?[32]u8 = null,
-    effective_gas_price: u128,
-    blob_gas_used: ?u64 = null,
-    blob_gas_price: ?u128 = null,
-};
+/// Re-export so callers can use transition.Log / transition.Receipt as before.
+pub const Log = input.Log;
+pub const Receipt = input.Receipt;
 
 pub const RejectedTx = struct {
     index: usize,
@@ -63,7 +35,7 @@ pub const TransitionResult = struct {
     receipts: []Receipt,
     rejected: []RejectedTx,
     cumulative_gas: u64,
-    block_bloom: bloom.Bloom,
+    block_bloom: input.Bloom,
     // Derived after execution
     current_base_fee: ?u64,
     excess_blob_gas: ?u64,
@@ -534,7 +506,7 @@ fn buildDb(
 
 // ─── Context setup ────────────────────────────────────────────────────────────
 
-fn buildBlockEnv(env: input.Env) context_mod.BlockEnv {
+fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
     var block = context_mod.BlockEnv.default();
     block.number = @as(primitives.U256, env.number);
     block.timestamp = @as(primitives.U256, env.timestamp);
@@ -545,7 +517,12 @@ fn buildBlockEnv(env: input.Env) context_mod.BlockEnv {
     block.prevrandao = env.random;
     // Blob gas — compute blob_gasprice via fake_exponential, not hardcode 1
     if (env.excess_blob_gas) |ebg| {
-        block.setBlobExcessGasAndPrice(ebg, primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE);
+        // EIP-7691 (Prague+): use updated fraction 5007716; Cancun and below use 3338477
+        const fraction = if (primitives.isEnabledIn(spec, .prague))
+            primitives.BLOB_BASE_FEE_UPDATE_FRACTION_OSAKA
+        else
+            primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE;
+        block.setBlobExcessGasAndPrice(ebg, fraction);
     }
     return block;
 }
@@ -619,7 +596,7 @@ pub fn transition(
     const db = try buildDb(arena, pre_alloc, env.block_hashes);
     // Context takes DB by value (moves into journal)
     var ctx = context_mod.Context.new(db, spec);
-    ctx.block = buildBlockEnv(env);
+    ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
 
@@ -731,6 +708,11 @@ pub fn transition(
                 // Recover the authorization signer if not already set.
                 const authority: context_mod.RecoveredAuthority = blk: {
                     if (ai.signer) |s| break :blk context_mod.RecoveredAuthority{ .Valid = s };
+                    // Validate signature fields per EIP-7702
+                    if (ai.y_parity > 1) break :blk context_mod.RecoveredAuthority.Invalid;
+                    // s must be in lower half of secp256k1 curve order
+                    const SECP256K1N_OVER_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
+                    if (ai.s > SECP256K1N_OVER_2) break :blk context_mod.RecoveredAuthority.Invalid;
                     // keccak256(0x05 || rlp([chain_id, address, nonce]))
                     const auth_hash = authorizationSigningHash(arena, &ai) catch break :blk context_mod.RecoveredAuthority.Invalid;
                     const recid: u8 = if (ai.y_parity == 0) 0 else 1;
@@ -969,12 +951,23 @@ pub fn transition(
             .effective_gas_price = egp,
             .blob_gas_used = if (tx.type == 3) tx.blob_versioned_hashes.len * 131_072 else null,
             .blob_gas_price = if (tx.type == 3)
-                if (ctx.block.blob_excess_gas_and_price) |bep| @as(u128, bep.blob_gasprice) else null
+                if (ctx.block.blob_excess_gas_and_price) |bep| bep.blob_gasprice else null
             else null,
         });
 
         // Free execution result logs (exec_result.logs is an ArrayList we own)
         exec_result.logs.deinit(std.heap.c_allocator);
+
+        // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
+        // Each receipt must encode the state root *after that specific transaction*
+        // (before subsequent txs and before the mining reward).
+        if (!primitives.isEnabledIn(spec, .byzantium)) {
+            const per_tx_alloc = extractPostState(arena, pre_alloc, &ctx) catch null;
+            if (per_tx_alloc) |pa| {
+                const sr = output_mod.computeStateRoot(arena, pa) catch null;
+                receipts.items[receipts.items.len - 1].state_root = sr;
+            }
+        }
 
         // Track accepted transactions (for txRoot — rejected txs are excluded)
         try accepted_txs.append(arena, tx.*);
@@ -1140,8 +1133,12 @@ fn extractPostState(
             continue;
         }
 
-        // Get or create post-alloc entry (base from pre-state if exists)
+        // Get or create post-alloc entry (base from pre-state if exists).
+        // Newly created accounts (created=true) and accounts whose storage was wiped by a
+        // prior SELFDESTRUCT (storage_wiped=true) must NOT inherit pre-state storage.
+        const fresh_storage = account.status.created or account.status.storage_wiped;
         var acct = post.get(addr) orelse input.AllocAccount{};
+        if (fresh_storage) acct.storage = .{};
 
         // Update basic fields
         acct.balance = account.info.balance;

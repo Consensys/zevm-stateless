@@ -62,6 +62,44 @@ pub const Env = struct {
     withdrawals: []Withdrawal = &.{},
 };
 
+// ─── Receipt / log types ──────────────────────────────────────────────────────
+
+/// Bloom filter: 2048-bit (256-byte) log accumulator.
+pub const Bloom = [256]u8;
+
+pub const Log = struct {
+    address: Address,
+    topics: []Hash,
+    data: []const u8,
+    block_number: u64,
+    tx_hash: Hash,
+    tx_index: u64,
+    block_hash: Hash,
+    log_index: u64,
+    removed: bool = false,
+};
+
+pub const Receipt = struct {
+    type: u8,
+    tx_hash: Hash,
+    tx_index: u64,
+    block_hash: Hash,
+    block_number: u64,
+    from: Address,
+    to: ?Address,
+    cumulative_gas_used: u64,
+    gas_used: u64,
+    contract_address: ?Address,
+    logs: []Log,
+    logs_bloom: Bloom,
+    status: u8,
+    /// Pre-Byzantium (EIP-658): intermediate state root after this tx. Null = post-Byzantium.
+    state_root: ?[32]u8 = null,
+    effective_gas_price: u128,
+    blob_gas_used: ?u64 = null,
+    blob_gas_price: ?u128 = null,
+};
+
 // ─── Transaction types ────────────────────────────────────────────────────────
 
 /// EIP-7702 authorization item (pre-recovered: signer known from fixture).

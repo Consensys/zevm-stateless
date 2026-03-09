@@ -5,7 +5,6 @@
 const std = @import("std");
 
 const types = @import("executor_types");
-const transition = @import("executor_transition");
 const rlp = @import("executor_rlp_encode");
 const mpt_builder = @import("mpt_builder");
 
@@ -13,7 +12,7 @@ const mpt_builder = @import("mpt_builder");
 
 /// Compute logsHash: keccak256 of the RLP-encoded list of all logs across all transactions.
 /// Each log is encoded as RLP([address, [topic1, ...], data]).
-pub fn computeLogsHash(alloc: std.mem.Allocator, receipts: []const transition.Receipt) ![32]u8 {
+pub fn computeLogsHash(alloc: std.mem.Allocator, receipts: []const types.Receipt) ![32]u8 {
     var log_items = std.ArrayListUnmanaged([]const u8){};
     defer log_items.deinit(alloc);
 
@@ -60,7 +59,7 @@ pub fn computeTxRoot(
 /// receiptsRoot: receipts trie, keys = RLP(index), values = typed receipt RLP.
 pub fn computeReceiptsRoot(
     alloc: std.mem.Allocator,
-    receipts: []const transition.Receipt,
+    receipts: []const types.Receipt,
 ) ![32]u8 {
     if (receipts.len == 0) return mpt_builder.EMPTY_TRIE_HASH;
     var items = try alloc.alloc(mpt_builder.KV, receipts.len);
@@ -137,7 +136,7 @@ fn encodeAccountRlp(
     return rlp.encodeList(alloc, &parts);
 }
 
-fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: transition.Receipt) ![]u8 {
+fn encodeReceiptRlp(alloc: std.mem.Allocator, receipt: types.Receipt) ![]u8 {
     // Encode logs
     var log_items = std.ArrayListUnmanaged([]const u8){};
     for (receipt.logs) |log| {

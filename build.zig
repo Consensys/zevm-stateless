@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Platform-aware crypto library prefix: Homebrew on macOS, /usr/local on Linux
+    const is_linux = b.graph.host.result.os.tag == .linux;
+    const crypto_prefix = if (is_linux) "/usr/local" else "/opt/homebrew";
+    const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
+    const libblst_path   = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
+    const libmcl_path    = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+
     // Build options — crypto libraries are disabled by default for zkVM targets
     const lib_options = b.addOptions();
     lib_options.addOption(bool, "enable_blst", false);
@@ -144,14 +151,14 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("executor", executor_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
-    exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    exe.addIncludePath(.{ .cwd_relative = crypto_include });
     exe.linkSystemLibrary("secp256k1");
     exe.linkSystemLibrary("ssl");
     exe.linkSystemLibrary("crypto");
     exe.linkSystemLibrary("c");
     exe.linkSystemLibrary("m");
-    exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
-    exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    exe.addObjectFile(.{ .cwd_relative = libmcl_path });
     exe.linkLibCpp();
 
     b.installArtifact(exe);
@@ -255,7 +262,7 @@ pub fn build(b: *std.Build) void {
 
     // Enable blst and mcl for native tools: override build_options and expose headers
     local_precompile.addImport("build_options", native_lib_options_module);
-    local_precompile.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    local_precompile.addIncludePath(.{ .cwd_relative = crypto_include });
 
     // ── Named executor modules for t8n / spec-test ───────────────────────────────
     // These expose executor/ source files as named imports so that t8n and spec-test
@@ -299,7 +306,6 @@ pub fn build(b: *std.Build) void {
     });
     native_executor_output_mod.addImport("executor_types",       executor_types_mod);
     native_executor_output_mod.addImport("executor_rlp_encode",  executor_rlp_encode_mod);
-    native_executor_output_mod.addImport("executor_transition",  native_executor_transition_mod);
     native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
 
     // executor_fork — mainnet hardfork schedule (block/timestamp → SpecId + reward)
@@ -318,6 +324,9 @@ pub fn build(b: *std.Build) void {
     });
     native_executor_tx_decode_mod.addImport("executor_types", executor_types_mod);
     native_executor_tx_decode_mod.addImport("mpt",            mpt_mod);
+
+    // Deferred: wire executor_output into transition (output_mod created after transition_mod)
+    native_executor_transition_mod.addImport("executor_output", native_executor_output_mod);
 
     // Wire named executor sub-modules into executor_mod (deferred — modules created above)
     executor_mod.addImport("executor_types",      executor_types_mod);
@@ -358,14 +367,14 @@ pub fn build(b: *std.Build) void {
     });
     // secp256k1_recovery.h and secp256k1.h are in the Homebrew include path.
     // OpenSSL headers and libraries are also required by zevm_local's precompile module.
-    t8n_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    t8n_exe.addIncludePath(.{ .cwd_relative = crypto_include });
     t8n_exe.linkSystemLibrary("secp256k1");
     t8n_exe.linkSystemLibrary("ssl");
     t8n_exe.linkSystemLibrary("crypto");
     t8n_exe.linkSystemLibrary("c");
     t8n_exe.linkSystemLibrary("m");
-    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
-    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    t8n_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    t8n_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
     t8n_exe.linkLibCpp();
 
     b.installArtifact(t8n_exe);
@@ -409,14 +418,14 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    spec_test_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    spec_test_exe.addIncludePath(.{ .cwd_relative = crypto_include });
     spec_test_exe.linkSystemLibrary("secp256k1");
     spec_test_exe.linkSystemLibrary("ssl");
     spec_test_exe.linkSystemLibrary("crypto");
     spec_test_exe.linkSystemLibrary("c");
     spec_test_exe.linkSystemLibrary("m");
-    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
-    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    spec_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    spec_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
     spec_test_exe.linkLibCpp();
 
     b.installArtifact(spec_test_exe);
@@ -473,14 +482,14 @@ pub fn build(b: *std.Build) void {
             },
         }),
     });
-    bc_test_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    bc_test_exe.addIncludePath(.{ .cwd_relative = crypto_include });
     bc_test_exe.linkSystemLibrary("secp256k1");
     bc_test_exe.linkSystemLibrary("ssl");
     bc_test_exe.linkSystemLibrary("crypto");
     bc_test_exe.linkSystemLibrary("c");
     bc_test_exe.linkSystemLibrary("m");
-    bc_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
-    bc_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    bc_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    bc_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
     bc_test_exe.linkLibCpp();
 
     b.installArtifact(bc_test_exe);
@@ -490,6 +499,54 @@ pub fn build(b: *std.Build) void {
     run_bc_tests_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_bc_tests_cmd.addArgs(args);
     run_bc_tests_step.dependOn(&run_bc_tests_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // hive-rlp — Hive consume-rlp execution client
+    //
+    // Reads /genesis.json and /blocks/*.rlp at startup, executes the chain,
+    // and serves eth_getBlockByNumber on :8545 for Hive validation.
+    //
+    // Usage: zig build hive-rlp
+    // ---------------------------------------------------------------------------
+    const hive_rlp_exe = b.addExecutable(.{
+        .name = "hive-rlp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/hive_rlp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "mpt",                 .module = mpt_mod                        },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod        },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "executor_fork",       .module = executor_fork_mod              },
+                .{ .name = "executor_tx_decode",  .module = native_executor_tx_decode_mod  },
+            },
+        }),
+    });
+    hive_rlp_exe.addIncludePath(.{ .cwd_relative = crypto_include });
+    hive_rlp_exe.linkSystemLibrary("secp256k1");
+    hive_rlp_exe.linkSystemLibrary("ssl");
+    hive_rlp_exe.linkSystemLibrary("crypto");
+    hive_rlp_exe.linkSystemLibrary("c");
+    hive_rlp_exe.linkSystemLibrary("m");
+    hive_rlp_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    hive_rlp_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
+    hive_rlp_exe.linkLibCpp();
+
+    b.installArtifact(hive_rlp_exe);
+
+    const run_hive_rlp_step = b.step("hive-rlp", "Build and install the Hive consume-rlp client");
+    run_hive_rlp_step.dependOn(b.getInstallStep());
 
     // zig build fetch-fixtures — download execution-spec-tests v5.4.0 develop fixtures
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests fixtures");
