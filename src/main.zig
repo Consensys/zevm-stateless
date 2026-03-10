@@ -1,13 +1,14 @@
 const std = @import("std");
 
-const io         = @import("io.zig");
-const json       = @import("json.zig");
-const rlp_decode = @import("rlp_decode");
+const io          = @import("io.zig");
+const json        = @import("json.zig");
+const rlp_decode  = @import("rlp_decode");
 const input       = @import("input");
 const primitives  = @import("primitives");
 const mpt         = @import("mpt");
 const db          = @import("db");
 const executor    = @import("executor");
+const alloc_mod   = @import("main_allocator");
 
 pub fn main() void {
     run() catch |err| {
@@ -17,9 +18,7 @@ pub fn main() void {
 }
 
 fn run() !void {
-    var arena = std.heap.ArenaAllocator.init(std.heap.page_allocator);
-    defer arena.deinit();
-    const allocator = arena.allocator();
+    const allocator = alloc_mod.get();
 
     const args = try std.process.argsAlloc(allocator);
 

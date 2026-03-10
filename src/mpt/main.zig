@@ -8,8 +8,9 @@
 //! All functions are allocation-free; stack buffers are used for nibble paths.
 
 const std = @import("std");
-const primitives = @import("primitives");
-const input     = @import("input");
+const primitives  = @import("primitives");
+const input       = @import("input");
+const keccak_impl = @import("keccak_impl");
 
 /// RLP decoder — also re-exported so callers (e.g. io.zig) can reuse it.
 pub const rlp = @import("rlp.zig");
@@ -39,10 +40,35 @@ pub const AccountState = struct {
 
 // ─── keccak256 ─────────────────────────────────────────────────────────────────
 
+/// Delegates to the injected keccak_impl module.
+/// Default: std.crypto pure-Zig.  Zisk build: hardware CSR circuit.
 pub fn keccak256(data: []const u8) [32]u8 {
-    var out: [32]u8 = undefined;
-    std.crypto.hash.sha3.Keccak256.hash(data, &out, .{});
-    return out;
+    return keccak_impl.keccak256(data);
+}
+
+// ─── NodeIndex ─────────────────────────────────────────────────────────────────
+
+/// Pre-computed hash → node-bytes map built once from the witness node pool.
+/// Use buildNodeIndex() to populate, then pass to the *Indexed verification
+/// functions for O(1) node lookups instead of O(N·keccak) linear scans.
+pub const NodeIndex = std.AutoHashMap([32]u8, []const u8);
+
+/// Build a NodeIndex from a flat node pool.
+/// Each entry maps keccak256(node_bytes) → node_bytes.
+/// The returned map is owned by the caller; call deinit() when done.
+pub fn buildNodeIndex(allocator: std.mem.Allocator, pool: []const []const u8) !NodeIndex {
+    var index = NodeIndex.init(allocator);
+    try index.ensureTotalCapacity(@intCast(pool.len));
+    for (pool) |node_bytes| {
+        const h = keccak256(node_bytes);
+        index.putAssumeCapacity(h, node_bytes);
+    }
+    return index;
+}
+
+/// O(1) index lookup — used by the indexed API for large witness pools.
+fn findNodeInIndex(index: *const NodeIndex, hash: primitives.Hash) ?[]const u8 {
+    return index.get(hash);
 }
 
 // ─── findNode ──────────────────────────────────────────────────────────────────
@@ -293,6 +319,139 @@ pub fn verifyStorage(
 ) MptError!u256 {
     const key_hash = keccak256(&slot);
     const value = try verifyProof(storage_root, key_hash, pool) orelse return 0;
+
+    const r     = rlp.decodeItem(value) catch return error.InvalidRlp;
+    const bytes = itemBytes(r.item) orelse return error.InvalidRlp;
+    if (bytes.len > 32) return error.InvalidRlp;
+    return decodeUint256(bytes) catch return error.InvalidRlp;
+}
+
+// ─── Indexed verification (O(1) node lookup) ───────────────────────────────────
+
+/// Like verifyProof but uses a pre-built NodeIndex for O(1) lookups.
+/// Build the index once with buildNodeIndex() and reuse across all keys.
+pub fn verifyProofIndexed(
+    root_hash: primitives.Hash,
+    key_hash:  primitives.Hash,
+    index:     *const NodeIndex,
+) MptError!?[]const u8 {
+    if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
+
+    var key_nibbles: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&key_hash, &key_nibbles);
+
+    const ExpectedRef = union(enum) {
+        hash:        [32]u8,
+        inline_node: []const u8,
+    };
+    var expected: ExpectedRef = .{ .hash = root_hash };
+    var pos: usize = 0;
+
+    while (true) {
+        const node_rlp: []const u8 = switch (expected) {
+            .hash        => |h|   findNodeInIndex(index, h) orelse return error.InvalidProof,
+            .inline_node => |inl| inl,
+        };
+
+        const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
+            error.InvalidRlp  => return error.InvalidRlp,
+            error.InvalidNode => return error.InvalidNode,
+        };
+
+        switch (decoded) {
+            .branch => |b| {
+                if (pos >= 64) return error.InvalidProof;
+                const nibble = key_nibbles[pos];
+                pos += 1;
+                switch (b.children[nibble]) {
+                    .empty       => return null,
+                    .hash        => |h|   expected = .{ .hash = h },
+                    .inline_node => |inl| expected = .{ .inline_node = inl },
+                }
+            },
+            .extension => |e| {
+                var path_buf: [128]u8 = undefined;
+                const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+                if (hp.is_leaf) return error.InvalidNode;
+                const prefix_nibs = path_buf[0..hp.len];
+                if (pos + prefix_nibs.len > 64) return error.InvalidProof;
+                if (!std.mem.eql(u8, prefix_nibs, key_nibbles[pos .. pos + prefix_nibs.len]))
+                    return null;
+                pos += prefix_nibs.len;
+                switch (e.child) {
+                    .empty       => return error.InvalidNode,
+                    .hash        => |h|   expected = .{ .hash = h },
+                    .inline_node => |inl| expected = .{ .inline_node = inl },
+                }
+            },
+            .leaf => |lf| {
+                var path_buf: [128]u8 = undefined;
+                const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+                if (!hp.is_leaf) return error.InvalidNode;
+                const suffix_nibs = path_buf[0..hp.len];
+                if (suffix_nibs.len != 64 - pos) return null;
+                if (!std.mem.eql(u8, suffix_nibs, key_nibbles[pos..])) return null;
+                return lf.value;
+            },
+        }
+    }
+}
+
+/// Like verifyAccount but uses a pre-built NodeIndex for O(1) node lookups.
+pub fn verifyAccountIndexed(
+    state_root: primitives.Hash,
+    address:    primitives.Address,
+    index:      *const NodeIndex,
+) MptError!?AccountState {
+    const key_hash = keccak256(&address);
+    const value = try verifyProofIndexed(state_root, key_hash, index) orelse return null;
+
+    const outer = rlp.decodeItem(value) catch return error.InvalidRlp;
+    const payload = switch (outer.item) {
+        .list  => |p| p,
+        .bytes => return error.InvalidRlp,
+    };
+    var rest = payload;
+
+    const nonce_r   = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const nonce     = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp)
+        catch return error.InvalidRlp;
+    rest = rest[nonce_r.consumed..];
+
+    const balance_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const balance   = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp)
+        catch return error.InvalidRlp;
+    rest = rest[balance_r.consumed..];
+
+    const storage_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const sbytes    = itemBytes(storage_r.item) orelse return error.InvalidRlp;
+    if (sbytes.len != 32) return error.InvalidRlp;
+    var storage_root: primitives.Hash = undefined;
+    @memcpy(&storage_root, sbytes);
+    rest = rest[storage_r.consumed..];
+
+    const code_r  = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const cbytes  = itemBytes(code_r.item) orelse return error.InvalidRlp;
+    if (cbytes.len != 32) return error.InvalidRlp;
+    var code_hash: primitives.Hash = undefined;
+    @memcpy(&code_hash, cbytes);
+
+    return AccountState{
+        .nonce        = nonce,
+        .balance      = balance,
+        .storage_root = storage_root,
+        .code_hash    = code_hash,
+    };
+}
+
+/// Like verifyStorage but uses a pre-built NodeIndex for O(1) node lookups.
+pub fn verifyStorageIndexed(
+    storage_root: primitives.Hash,
+    slot:         primitives.Hash,
+    index:        *const NodeIndex,
+) MptError!u256 {
+    const key_hash = keccak256(&slot);
+    const value = try verifyProofIndexed(storage_root, key_hash, index) orelse return 0;
 
     const r     = rlp.decodeItem(value) catch return error.InvalidRlp;
     const bytes = itemBytes(r.item) orelse return error.InvalidRlp;

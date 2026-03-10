@@ -11,18 +11,6 @@ pub fn build(b: *std.Build) void {
     const libblst_path   = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path    = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
-    // Build options — crypto libraries are disabled by default for zkVM targets
-    const lib_options = b.addOptions();
-    lib_options.addOption(bool, "enable_blst", false);
-    lib_options.addOption(bool, "enable_mcl", false);
-    const lib_options_module = lib_options.createModule();
-
-    // Build options for native tools (spec-test-runner, t8n) — crypto enabled for correct precompile behavior
-    const native_lib_options = b.addOptions();
-    native_lib_options.addOption(bool, "enable_blst", true);
-    native_lib_options.addOption(bool, "enable_mcl", true);
-    const native_lib_options_module = native_lib_options.createModule();
-
     // zevm dependency
     const zevm_dep = b.dependency("zevm", .{
         .target = target,
@@ -39,9 +27,6 @@ pub fn build(b: *std.Build) void {
     const handler = zevm_dep.module("handler");
     const inspector = zevm_dep.module("inspector");
 
-    // Override precompile build_options to match our crypto settings
-    precompile.addImport("build_options", lib_options_module);
-
     // Local modules
     const input_mod = b.addModule("input", .{
         .root_source_file = b.path("src/input.zig"),
@@ -56,6 +41,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     output_mod.addImport("primitives", primitives);
+
+    // Default keccak_impl — pure-Zig std.crypto wrapper.
+    // Overridden in Zisk builds to inject the hardware keccakf circuit:
+    //   mpt_mod.addImport("keccak_impl", your_hw_keccak_module)
+    const keccak_impl_mod = b.addModule("keccak_impl", .{
+        .root_source_file = b.path("src/mpt/keccak_impl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     // mpt_nibbles: shared nibble utilities — standalone so mpt and mpt_builder can both use it
     const mpt_nibbles_mod = b.createModule(.{
@@ -72,6 +66,7 @@ pub fn build(b: *std.Build) void {
     mpt_mod.addImport("primitives", primitives);
     mpt_mod.addImport("input", input_mod);
     mpt_mod.addImport("mpt_nibbles", mpt_nibbles_mod);
+    mpt_mod.addImport("keccak_impl", keccak_impl_mod);
 
     // rlp_decode — single source of truth for raw RLP → input types
     const rlp_decode_mod = b.addModule("rlp_decode", .{
@@ -133,6 +128,16 @@ pub fn build(b: *std.Build) void {
     mod.addImport("db", db_mod);
     mod.addImport("executor", executor_mod);
 
+    // main_allocator — injectable allocator for the zevm_stateless binary.
+    // Default: std.heap.c_allocator (suitable for native builds).
+    // Override for zkVM builds:
+    //   exe.root_module.addImport("main_allocator", your_alloc_module)
+    const main_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("src/main_allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zevm_stateless",
         .root_module = b.createModule(.{
@@ -145,21 +150,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.root_module.addImport("primitives", primitives);
-    exe.root_module.addImport("bytecode", bytecode);
-    exe.root_module.addImport("state", state);
-    exe.root_module.addImport("database", database);
-    exe.root_module.addImport("context", context);
-    exe.root_module.addImport("interpreter", interpreter);
-    exe.root_module.addImport("precompile", precompile);
-    exe.root_module.addImport("handler", handler);
-    exe.root_module.addImport("inspector", inspector);
-    exe.root_module.addImport("input", input_mod);
-    exe.root_module.addImport("output", output_mod);
-    exe.root_module.addImport("mpt", mpt_mod);
-    exe.root_module.addImport("db", db_mod);
-    exe.root_module.addImport("executor", executor_mod);
-    exe.root_module.addImport("rlp_decode", rlp_decode_mod);
+    exe.root_module.addImport("primitives",     primitives);
+    exe.root_module.addImport("bytecode",       bytecode);
+    exe.root_module.addImport("state",          state);
+    exe.root_module.addImport("database",       database);
+    exe.root_module.addImport("context",        context);
+    exe.root_module.addImport("interpreter",    interpreter);
+    exe.root_module.addImport("precompile",     precompile);
+    exe.root_module.addImport("handler",        handler);
+    exe.root_module.addImport("inspector",      inspector);
+    exe.root_module.addImport("input",          input_mod);
+    exe.root_module.addImport("output",         output_mod);
+    exe.root_module.addImport("mpt",            mpt_mod);
+    exe.root_module.addImport("db",             db_mod);
+    exe.root_module.addImport("executor",       executor_mod);
+    exe.root_module.addImport("rlp_decode",     rlp_decode_mod);
+    exe.root_module.addImport("main_allocator", main_allocator_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
     exe.addIncludePath(.{ .cwd_relative = crypto_include });
@@ -253,31 +259,23 @@ pub fn build(b: *std.Build) void {
     //   t8n --input.alloc A --input.env E --input.txs T --state.fork F \
     //       --output.alloc out/alloc.json --output.result out/result.json
     //
-    // Uses the local zevm branch (feat/gap-analysis) for EVM execution.
+    // Uses zevm for EVM execution.
     // Links secp256k1 for transaction signing/recovery, OpenSSL for precompiles.
     // ---------------------------------------------------------------------------
-    const zevm_local_dep = b.dependency("zevm_local", .{
-        .target = target,
-        .optimize = optimize,
-        .blst = false,
-        .mcl = false,
-    });
-
-    const local_primitives = zevm_local_dep.module("primitives");
-    const local_state = zevm_local_dep.module("state");
-    const local_bytecode = zevm_local_dep.module("bytecode");
-    const local_database = zevm_local_dep.module("database");
-    const local_context = zevm_local_dep.module("context");
-    const local_handler = zevm_local_dep.module("handler");
-    const local_precompile = zevm_local_dep.module("precompile");
-
-    // Enable blst and mcl for native tools: override build_options and expose headers
-    local_precompile.addImport("build_options", native_lib_options_module);
-    local_precompile.addIncludePath(.{ .cwd_relative = crypto_include });
 
     // ── Named executor modules for t8n / spec-test ───────────────────────────────
     // These expose executor/ source files as named imports so that t8n and spec-test
     // can import them without crossing module-root boundaries.
+
+    // executor_allocator — injectable allocator for executor internals.
+    // Default: std.heap.c_allocator (suitable for native builds).
+    // zkVM builds override this by wiring their own module:
+    //   executor_transition_mod.addImport("executor_allocator", your_alloc_module)
+    const executor_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/executor_allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     // executor_types — canonical EVM type definitions; no external deps
     const executor_types_mod = b.createModule(.{
@@ -301,13 +299,24 @@ pub fn build(b: *std.Build) void {
     });
     native_executor_transition_mod.addImport("executor_types",      executor_types_mod);
     native_executor_transition_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
-    native_executor_transition_mod.addImport("primitives",          local_primitives);
-    native_executor_transition_mod.addImport("state",          local_state);
-    native_executor_transition_mod.addImport("bytecode",       local_bytecode);
-    native_executor_transition_mod.addImport("database",       local_database);
-    native_executor_transition_mod.addImport("context",        local_context);
-    native_executor_transition_mod.addImport("handler",        local_handler);
-    native_executor_transition_mod.addImport("precompile",     local_precompile);
+    native_executor_transition_mod.addImport("primitives",          primitives);
+    native_executor_transition_mod.addImport("state",               state);
+    native_executor_transition_mod.addImport("bytecode",            bytecode);
+    native_executor_transition_mod.addImport("database",            database);
+    native_executor_transition_mod.addImport("context",             context);
+    native_executor_transition_mod.addImport("handler",             handler);
+    native_executor_transition_mod.addImport("precompile",          precompile);
+    // secp256k1_wrapper — default: standalone C wrapper for native tx signing.
+    // Independent of zevm's precompile module graph to avoid file-ownership
+    // conflicts.  Override in zkVM builds with an accelerated implementation:
+    //   transition_mod.addImport("secp256k1_wrapper", your_zisk_module)
+    const secp256k1_impl_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/secp256k1_impl.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_transition_mod.addImport("secp256k1_wrapper",   secp256k1_impl_mod);
+    native_executor_transition_mod.addImport("executor_allocator",  executor_allocator_mod);
 
     // native_executor_output — trie computations; uses executor_transition for type consistency
     const native_executor_output_mod = b.createModule(.{
@@ -326,7 +335,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    executor_fork_mod.addImport("primitives", local_primitives);
+    executor_fork_mod.addImport("primitives", primitives);
 
     // native_executor_tx_decode — raw RLP tx bytes → TxInput, or input.Transaction → TxInput
     const native_executor_tx_decode_mod = b.createModule(.{
@@ -364,13 +373,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = local_primitives               },
-                .{ .name = "state",               .module = local_state                    },
-                .{ .name = "bytecode",            .module = local_bytecode                 },
-                .{ .name = "database",            .module = local_database                 },
-                .{ .name = "context",             .module = local_context                  },
-                .{ .name = "handler",             .module = local_handler                  },
-                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "primitives",          .module = primitives               },
+                .{ .name = "state",               .module = state                    },
+                .{ .name = "bytecode",            .module = bytecode                 },
+                .{ .name = "database",            .module = database                 },
+                .{ .name = "context",             .module = context                  },
+                .{ .name = "handler",             .module = handler                  },
+                .{ .name = "precompile",          .module = precompile               },
                 .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
                 .{ .name = "executor_types",      .module = executor_types_mod             },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
@@ -416,13 +425,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = local_primitives               },
-                .{ .name = "state",               .module = local_state                    },
-                .{ .name = "bytecode",            .module = local_bytecode                 },
-                .{ .name = "database",            .module = local_database                 },
-                .{ .name = "context",             .module = local_context                  },
-                .{ .name = "handler",             .module = local_handler                  },
-                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "primitives",          .module = primitives               },
+                .{ .name = "state",               .module = state                    },
+                .{ .name = "bytecode",            .module = bytecode                 },
+                .{ .name = "database",            .module = database                 },
+                .{ .name = "context",             .module = context                  },
+                .{ .name = "handler",             .module = handler                  },
+                .{ .name = "precompile",          .module = precompile               },
                 .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
                 .{ .name = "executor_types",      .module = executor_types_mod             },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
@@ -465,7 +474,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    blockchain_test_runner_mod.addImport("primitives",           local_primitives);
+    blockchain_test_runner_mod.addImport("primitives",           primitives);
     blockchain_test_runner_mod.addImport("executor_types",       executor_types_mod);
     blockchain_test_runner_mod.addImport("executor_transition",  native_executor_transition_mod);
     blockchain_test_runner_mod.addImport("executor_output",      native_executor_output_mod);
@@ -480,13 +489,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = local_primitives               },
-                .{ .name = "state",               .module = local_state                    },
-                .{ .name = "bytecode",            .module = local_bytecode                 },
-                .{ .name = "database",            .module = local_database                 },
-                .{ .name = "context",             .module = local_context                  },
-                .{ .name = "handler",             .module = local_handler                  },
-                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "primitives",          .module = primitives               },
+                .{ .name = "state",               .module = state                    },
+                .{ .name = "bytecode",            .module = bytecode                 },
+                .{ .name = "database",            .module = database                 },
+                .{ .name = "context",             .module = context                  },
+                .{ .name = "handler",             .module = handler                  },
+                .{ .name = "precompile",          .module = precompile               },
                 .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
                 .{ .name = "executor_types",      .module = executor_types_mod             },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
@@ -552,13 +561,13 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = local_primitives               },
-                .{ .name = "state",               .module = local_state                    },
-                .{ .name = "bytecode",            .module = local_bytecode                 },
-                .{ .name = "database",            .module = local_database                 },
-                .{ .name = "context",             .module = local_context                  },
-                .{ .name = "handler",             .module = local_handler                  },
-                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "primitives",          .module = primitives               },
+                .{ .name = "state",               .module = state                    },
+                .{ .name = "bytecode",            .module = bytecode                 },
+                .{ .name = "database",            .module = database                 },
+                .{ .name = "context",             .module = context                  },
+                .{ .name = "handler",             .module = handler                  },
+                .{ .name = "precompile",          .module = precompile               },
                 .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
                 .{ .name = "mpt",                 .module = mpt_mod                        },
                 .{ .name = "executor_types",      .module = executor_types_mod             },
