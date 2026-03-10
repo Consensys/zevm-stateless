@@ -68,13 +68,6 @@ fn run() !void {
     // ── Phase 1: MPT proof verification ───────────────────────────────────────
     std.debug.print("Phase 1  MPT proof verification\n", .{});
     {
-        // Thin wrapper so verifyProofVerbose (anytype writer) can use std.debug.print.
-        const DebugWriter = struct {
-            pub fn print(_: @This(), comptime fmt: []const u8, a: anytype) error{}!void {
-                std.debug.print(fmt, a);
-            }
-        };
-        const stderr = DebugWriter{};
         var phase1_ok = true;
         var current_addr: ?primitives.Address = null;
 
@@ -84,24 +77,10 @@ fn run() !void {
                 @memcpy(&addr, key[0..20]);
                 current_addr = addr;
 
-                const key_hash = mpt.keccak256(&addr);
-                stderr.print("  [{d:>4}] account  0x{x}\n", .{ i, addr }) catch {};
-                stderr.print("        key_hash  0x{x}\n", .{key_hash}) catch {};
-
-                _ = mpt.verifyProofVerbose(si.witness.state_root, key_hash, si.witness.nodes, stderr) catch |e| {
-                    stderr.print("        FAIL → {}\n", .{e}) catch {};
+                _ = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |e| {
+                    std.debug.print("  [{d:>4}] FAIL account 0x{x} → {}\n", .{ i, addr, e });
                     phase1_ok = false;
-                    continue;
                 };
-
-                const result = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch unreachable;
-                if (result) |a| {
-                    const type_str = if (std.mem.eql(u8, &a.code_hash, &primitives.KECCAK_EMPTY))
-                        "EOA" else "contract";
-                    stderr.print("        → nonce={d}  balance={d}  type={s}\n", .{ a.nonce, a.balance, type_str }) catch {};
-                } else {
-                    stderr.print("        → (absent)\n", .{}) catch {};
-                }
 
             } else if (key.len == 52) {
                 var addr: primitives.Address = undefined;
@@ -111,24 +90,15 @@ fn run() !void {
                 @memcpy(&slot, key[20..52]);
 
                 const acct = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |e| {
-                    stderr.print("  [{d:>4}] FAIL account 0x{x} (storage) → {}\n", .{ i, addr, e }) catch {};
+                    std.debug.print("  [{d:>4}] FAIL account 0x{x} (storage) → {}\n", .{ i, addr, e });
                     phase1_ok = false;
                     continue;
                 };
                 if (acct) |a| {
-                    const slot_key_hash = mpt.keccak256(&slot);
-                    stderr.print("  [{d:>4}] storage  0x{x}  slot=0x{x}\n", .{ i, addr, slot }) catch {};
-                    stderr.print("        storage_root  0x{x}\n", .{a.storage_root}) catch {};
-                    stderr.print("        key_hash      0x{x}\n", .{slot_key_hash}) catch {};
-                    _ = mpt.verifyProofVerbose(a.storage_root, slot_key_hash, si.witness.nodes, stderr) catch |e| {
-                        stderr.print("        FAIL → {}\n", .{e}) catch {};
+                    _ = mpt.verifyStorage(a.storage_root, slot, si.witness.nodes) catch |e| {
+                        std.debug.print("  [{d:>4}] FAIL storage 0x{x} slot=0x{x} → {}\n", .{ i, addr, slot, e });
                         phase1_ok = false;
-                        continue;
                     };
-                    const value = mpt.verifyStorage(a.storage_root, slot, si.witness.nodes) catch unreachable;
-                    stderr.print("        → value=0x{x}\n", .{value}) catch {};
-                } else {
-                    stderr.print("  [{d:>4}] storage  0x{x}  slot=0x{x}  value=0  (account absent)\n", .{ i, addr, slot }) catch {};
                 }
 
             } else if (key.len == 32) {
@@ -137,31 +107,17 @@ fn run() !void {
 
                 if (current_addr) |addr| {
                     const acct = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |e| {
-                        stderr.print("  [{d:>4}] FAIL account 0x{x} (storage) → {}\n", .{ i, addr, e }) catch {};
+                        std.debug.print("  [{d:>4}] FAIL account 0x{x} (storage) → {}\n", .{ i, addr, e });
                         phase1_ok = false;
                         continue;
                     };
                     if (acct) |a| {
-                        const slot_key_hash = mpt.keccak256(&slot);
-                        stderr.print("  [{d:>4}] storage  0x{x}  slot=0x{x}\n", .{ i, addr, slot }) catch {};
-                        stderr.print("        storage_root  0x{x}\n", .{a.storage_root}) catch {};
-                        stderr.print("        key_hash      0x{x}\n", .{slot_key_hash}) catch {};
-                        _ = mpt.verifyProofVerbose(a.storage_root, slot_key_hash, si.witness.nodes, stderr) catch |e| {
-                            stderr.print("        FAIL → {}\n", .{e}) catch {};
+                        _ = mpt.verifyStorage(a.storage_root, slot, si.witness.nodes) catch |e| {
+                            std.debug.print("  [{d:>4}] FAIL storage 0x{x} slot=0x{x} → {}\n", .{ i, addr, slot, e });
                             phase1_ok = false;
-                            continue;
                         };
-                        const value = mpt.verifyStorage(a.storage_root, slot, si.witness.nodes) catch unreachable;
-                        stderr.print("        → value=0x{x}\n", .{value}) catch {};
-                    } else {
-                        stderr.print("  [{d:>4}] storage  0x{x}  slot=0x{x}  value=0  (account absent)\n", .{ i, addr, slot }) catch {};
                     }
-                } else {
-                    stderr.print("  [{d:>4}] SKIP slot 0x{x} (no preceding account key)\n", .{ i, slot }) catch {};
                 }
-
-            } else {
-                stderr.print("  [{d:>4}] SKIP key with unexpected length {d}\n", .{ i, key.len }) catch {};
             }
         }
 
@@ -184,26 +140,12 @@ fn run() !void {
         var addr: primitives.Address = undefined;
         @memcpy(&addr, key[0..20]);
 
-        const account_state = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |err| {
+        _ = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |err| {
             std.debug.print("  0x{x}  error: {}\n", .{ addr, err });
-            continue;
         };
-
-        if (account_state) |a| {
-            const code_desc = if (std.mem.eql(u8, &a.code_hash, &primitives.KECCAK_EMPTY))
-                "EOA" else "contract";
-            std.debug.print(
-                "  0x{x}  nonce={d}  balance={d}  type={s}  code_hash=0x{x}  storage_root=0x{x}\n",
-                .{ addr, a.nonce, a.balance, code_desc, a.code_hash, a.storage_root },
-            );
-        } else {
-            std.debug.print("  0x{x}  (absent from trie)\n", .{addr});
-        }
     }
 
-    if (account_count == 0) {
-        std.debug.print("  (no account keys in witness)\n", .{});
-    }
+    std.debug.print("  {d} account(s) in witness\n\n", .{account_count});
 
     // ── Phase 3: Block execution ───────────────────────────────────────────────
     std.debug.print("\nPhase 3  Block execution\n", .{});
