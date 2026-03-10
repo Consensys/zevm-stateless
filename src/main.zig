@@ -23,42 +23,32 @@ fn run() !void {
 
     const args = try std.process.argsAlloc(allocator);
 
-    // Optional: --fork <ForkName> overrides mainnet schedule detection.
+    // Parse flags and collect positional (file path) arguments.
+    // --fork <name> may appear anywhere; all other args are treated as file paths.
     var fork_name: ?[]const u8 = null;
+    var file_paths = std.ArrayListUnmanaged([]const u8){};
+    {
+        var arg_i: usize = 1;
+        while (arg_i < args.len) : (arg_i += 1) {
+            if (std.mem.eql(u8, args[arg_i], "--fork") and arg_i + 1 < args.len) {
+                arg_i += 1;
+                fork_name = args[arg_i];
+            } else {
+                try file_paths.append(allocator, args[arg_i]);
+            }
+        }
+    }
 
-    const si: input.StatelessInput = if (args.len == 1) blk: {
-        // No CLI args — read binary StatelessInput from stdin (zevm-zisk format).
+    const si: input.StatelessInput = if (file_paths.items.len == 0) blk: {
+        // No file paths — read binary StatelessInput from stdin (zevm-zisk format).
         break :blk io.fromStdin(allocator) catch |err| {
             std.debug.print("error: failed to parse stateless input from stdin: {}\n", .{err});
             std.debug.print("hint:  pipe a zevm-zisk binary StatelessInput, or pass block/witness paths as args\n", .{});
             std.process.exit(1);
         };
-    } else if (args.len >= 2 and std.mem.eql(u8, args[1], "--stdin")) blk: {
-        // --stdin: framed binary from Besu plugin.
-        // Layout: [u32 rlp_len][block RLP][u32 json_len][witness JSON]
-        var arg_i: usize = 2;
-        while (arg_i < args.len) : (arg_i += 1) {
-            if (std.mem.eql(u8, args[arg_i], "--fork") and arg_i + 1 < args.len) {
-                arg_i += 1;
-                fork_name = args[arg_i];
-            }
-        }
-        break :blk io.fromStdinFramed(allocator) catch |err| {
-            std.debug.print("error: failed to parse framed binary from stdin: {}\n", .{err});
-            std.process.exit(1);
-        };
     } else blk: {
-        const block_path   = args[1];
-        const witness_path = if (args.len > 2) args[2] else "examples/witness.json";
-
-        // Scan remaining args for --fork.
-        var arg_i: usize = 3;
-        while (arg_i < args.len) : (arg_i += 1) {
-            if (std.mem.eql(u8, args[arg_i], "--fork") and arg_i + 1 < args.len) {
-                arg_i += 1;
-                fork_name = args[arg_i];
-            }
-        }
+        const block_path   = file_paths.items[0];
+        const witness_path = if (file_paths.items.len > 1) file_paths.items[1] else "examples/witness.json";
 
         const block_json = std.fs.cwd().readFileAlloc(allocator, block_path, 1 << 20) catch |err| {
             std.debug.print("error: cannot read {s}: {}\n", .{ block_path, err });
