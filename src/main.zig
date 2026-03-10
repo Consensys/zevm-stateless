@@ -33,6 +33,20 @@ fn run() !void {
             std.debug.print("hint:  pipe a zevm-zisk binary StatelessInput, or pass block/witness paths as args\n", .{});
             std.process.exit(1);
         };
+    } else if (args.len >= 2 and std.mem.eql(u8, args[1], "--stdin")) blk: {
+        // --stdin: framed binary from Besu plugin.
+        // Layout: [u32 rlp_len][block RLP][u32 json_len][witness JSON]
+        var arg_i: usize = 2;
+        while (arg_i < args.len) : (arg_i += 1) {
+            if (std.mem.eql(u8, args[arg_i], "--fork") and arg_i + 1 < args.len) {
+                arg_i += 1;
+                fork_name = args[arg_i];
+            }
+        }
+        break :blk io.fromStdinFramed(allocator) catch |err| {
+            std.debug.print("error: failed to parse framed binary from stdin: {}\n", .{err});
+            std.process.exit(1);
+        };
     } else blk: {
         const block_path   = args[1];
         const witness_path = if (args.len > 2) args[2] else "examples/witness.json";

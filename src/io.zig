@@ -16,6 +16,7 @@ const std        = @import("std");
 const input_mod  = @import("input");
 const primitives = @import("primitives");
 const rlp_decode = @import("rlp_decode");
+const json_mod   = @import("json.zig");
 
 /// Read all of stdin into a freshly allocated slice owned by `allocator`.
 fn readStdin(allocator: std.mem.Allocator) ![]u8 {
@@ -291,4 +292,38 @@ pub fn fromStdin(allocator: std.mem.Allocator) !input_mod.StatelessInput {
     const data = try readStdin(allocator);
     var d = Deserializer.init(allocator, data);
     return d.readStatelessInput();
+}
+
+/// Deserialize a Besu-plugin framed binary input from stdin.
+///
+/// Frame layout (all integers big-endian):
+///   [u32: block RLP length] [block RLP bytes]
+///   [u32: witness JSON length] [witness JSON bytes]
+///
+/// The block RLP is the raw wire bytes from debug_getRawBlock.
+/// The witness JSON is the full JSON-RPC response from debug_executionWitness.
+pub fn fromStdinFramed(allocator: std.mem.Allocator) !input_mod.StatelessInput {
+    const data = try readStdin(allocator);
+    if (data.len < 8) return error.UnexpectedEndOfInput;
+
+    const rlp_len: usize = std.mem.readInt(u32, data[0..4], .big);
+    if (4 + rlp_len + 4 > data.len) return error.UnexpectedEndOfInput;
+    const rlp_bytes = data[4..][0..rlp_len];
+
+    const after_rlp = 4 + rlp_len;
+    const json_len: usize = std.mem.readInt(u32, data[after_rlp..][0..4], .big);
+    if (after_rlp + 4 + json_len > data.len) return error.UnexpectedEndOfInput;
+    const json_bytes = data[after_rlp + 4..][0..json_len];
+
+    const blk = try json_mod.parseBlockFromRlp(allocator, rlp_bytes);
+    var wit   = try json_mod.parseWitnessJson(allocator, json_bytes);
+    wit.state_root = rlp_decode.findPreStateRoot(wit.headers, blk.header.number)
+                     orelse blk.header.state_root;
+
+    return input_mod.StatelessInput{
+        .block        = blk.header,
+        .transactions = blk.transactions,
+        .witness      = wit,
+        .withdrawals  = blk.withdrawals,
+    };
 }
