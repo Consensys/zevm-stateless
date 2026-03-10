@@ -128,6 +128,16 @@ pub fn build(b: *std.Build) void {
     mod.addImport("db", db_mod);
     mod.addImport("executor", executor_mod);
 
+    // main_allocator — injectable allocator for the zevm_stateless binary.
+    // Default: std.heap.c_allocator (suitable for native builds).
+    // Override for zkVM builds:
+    //   exe.root_module.addImport("main_allocator", your_alloc_module)
+    const main_allocator_mod = b.createModule(.{
+        .root_source_file = b.path("src/main_allocator.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zevm_stateless",
         .root_module = b.createModule(.{
@@ -140,21 +150,22 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.root_module.addImport("primitives", primitives);
-    exe.root_module.addImport("bytecode", bytecode);
-    exe.root_module.addImport("state", state);
-    exe.root_module.addImport("database", database);
-    exe.root_module.addImport("context", context);
-    exe.root_module.addImport("interpreter", interpreter);
-    exe.root_module.addImport("precompile", precompile);
-    exe.root_module.addImport("handler", handler);
-    exe.root_module.addImport("inspector", inspector);
-    exe.root_module.addImport("input", input_mod);
-    exe.root_module.addImport("output", output_mod);
-    exe.root_module.addImport("mpt", mpt_mod);
-    exe.root_module.addImport("db", db_mod);
-    exe.root_module.addImport("executor", executor_mod);
-    exe.root_module.addImport("rlp_decode", rlp_decode_mod);
+    exe.root_module.addImport("primitives",     primitives);
+    exe.root_module.addImport("bytecode",       bytecode);
+    exe.root_module.addImport("state",          state);
+    exe.root_module.addImport("database",       database);
+    exe.root_module.addImport("context",        context);
+    exe.root_module.addImport("interpreter",    interpreter);
+    exe.root_module.addImport("precompile",     precompile);
+    exe.root_module.addImport("handler",        handler);
+    exe.root_module.addImport("inspector",      inspector);
+    exe.root_module.addImport("input",          input_mod);
+    exe.root_module.addImport("output",         output_mod);
+    exe.root_module.addImport("mpt",            mpt_mod);
+    exe.root_module.addImport("db",             db_mod);
+    exe.root_module.addImport("executor",       executor_mod);
+    exe.root_module.addImport("rlp_decode",     rlp_decode_mod);
+    exe.root_module.addImport("main_allocator", main_allocator_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
     exe.addIncludePath(.{ .cwd_relative = crypto_include });

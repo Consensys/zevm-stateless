@@ -689,12 +689,12 @@ pub fn transition(
         }
 
         // EIP-4844: pass blob hashes and max fee per blob gas to the EVM context
-        if (ctx.tx.blob_hashes) |*old_bh| old_bh.deinit(arena);
+        if (ctx.tx.blob_hashes) |*old_bh| old_bh.deinit(alloc_mod.get());
         if (tx.type == 3) {
             // Always create a blob_hashes list for type-3 txs (even if empty), so that
             // validateBlobTx sees an empty list and rejects it with EmptyBlobList.
             var blob_list = std.ArrayList(primitives.Hash){};
-            blob_list.appendSlice(arena, tx.blob_versioned_hashes) catch {};
+            blob_list.appendSlice(alloc_mod.get(), tx.blob_versioned_hashes) catch {};
             ctx.tx.blob_hashes = blob_list;
             ctx.tx.max_fee_per_blob_gas = tx.max_fee_per_blob_gas orelse 0;
         } else {
