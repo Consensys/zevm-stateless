@@ -17,11 +17,16 @@ pub const AllocAccount = struct {
     nonce: u64 = 0,
     code: []const u8 = &.{},
     storage: std.AutoHashMapUnmanaged(U256, U256) = .{},
+    /// Pre-execution storage root (proven via MPT witness).
+    /// When non-null, `storage` is treated as a delta: only touched slots are stored,
+    /// and 0-valued entries indicate deletions.  computeStorageRoot() applies these
+    /// deltas to this root instead of building a new trie from scratch.
+    pre_storage_root: ?[32]u8 = null,
 };
 
 pub const AccessListEntry = struct {
     address: Address,
-    storage_keys: []Hash,
+    storage_keys: []const Hash,
 };
 
 pub const Withdrawal = struct {

@@ -169,7 +169,8 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
 
     const payload = switch (tx.type) {
         0 => blk: {
-            if (tx.protected and chain_id > 0) {
+            const tx_chain_id = tx.chain_id orelse chain_id;
+            if (tx.protected and tx_chain_id > 0) {
                 // EIP-155: include chainId, 0, 0
                 const items = [_][]const u8{
                     try rlp.encodeU64(alloc, tx.nonce orelse 0),
@@ -178,7 +179,7 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                     to_enc,
                     try rlp.encodeU256(alloc, tx.value),
                     try rlp.encodeBytes(alloc, tx.data),
-                    try rlp.encodeU64(alloc, chain_id),
+                    try rlp.encodeU64(alloc, tx_chain_id),
                     try rlp.encodeBytes(alloc, &.{}), // 0
                     try rlp.encodeBytes(alloc, &.{}), // 0
                 };
@@ -381,7 +382,9 @@ fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u
         0 => blk: {
             // EIP-155: v = 2*chainId + 35 + recid  → recid = v - 2*chainId - 35
             // Legacy: v = 27/28 → recid = v - 27
-            const chain_v: u256 = 2 * @as(u256, chain_id) + 35;
+            // Use the tx's own chain_id if present (important for non-mainnet chains).
+            const cid: u64 = tx.chain_id orelse chain_id;
+            const chain_v: u256 = 2 * @as(u256, cid) + 35;
             if (v_val >= chain_v and v_val <= chain_v + 1) {
                 break :blk @intCast(v_val - chain_v);
             } else if (v_val == 27 or v_val == 28) {
@@ -964,7 +967,7 @@ pub fn transition(
         if (!primitives.isEnabledIn(spec, .byzantium)) {
             const per_tx_alloc = extractPostState(arena, pre_alloc, &ctx) catch null;
             if (per_tx_alloc) |pa| {
-                const sr = output_mod.computeStateRoot(arena, pa) catch null;
+                const sr = output_mod.computeStateRoot(arena, pa, &.{}) catch null;
                 receipts.items[receipts.items.len - 1].state_root = sr;
             }
         }
@@ -1106,11 +1109,17 @@ fn extractPostState(
     var pre_it = pre_alloc.iterator();
     while (pre_it.next()) |pre_entry| {
         var acct = input.AllocAccount{
-            .balance = pre_entry.value_ptr.*.balance,
-            .nonce = pre_entry.value_ptr.*.nonce,
-            .code = pre_entry.value_ptr.*.code,
+            .balance          = pre_entry.value_ptr.*.balance,
+            .nonce            = pre_entry.value_ptr.*.nonce,
+            .code             = pre_entry.value_ptr.*.code,
+            .pre_storage_root = pre_entry.value_ptr.*.pre_storage_root,
         };
-        // Clone storage
+        // Clone storage (included for both normal and delta modes:
+        //   - Normal mode (pre_storage_root==null): full pre-state for scratch-build.
+        //   - Delta mode (pre_storage_root set): includes witness-proven slots AND any
+        //     direct pre_alloc mutations (e.g. EIP-2935/4788 system calls). All entries
+        //     are applied as updates/insertions to pre_storage_root; unchanged ones are
+        //     idempotent. Zero values written later signal deletions.)
         var sit = pre_entry.value_ptr.*.storage.iterator();
         while (sit.next()) |slot| {
             try acct.storage.put(arena, slot.key_ptr.*, slot.value_ptr.*);
@@ -1138,7 +1147,10 @@ fn extractPostState(
         // prior SELFDESTRUCT (storage_wiped=true) must NOT inherit pre-state storage.
         const fresh_storage = account.status.created or account.status.storage_wiped;
         var acct = post.get(addr) orelse input.AllocAccount{};
-        if (fresh_storage) acct.storage = .{};
+        if (fresh_storage) {
+            acct.storage = .{};
+            acct.pre_storage_root = null; // rebuild from scratch for freshly-created/wiped storage
+        }
 
         // Update basic fields
         acct.balance = account.info.balance;
@@ -1186,13 +1198,19 @@ fn extractPostState(
             acct.code = &.{};
         }
 
-        // Update storage: merge pre-state slots with journal modifications
+        // Update storage: merge pre-state slots with journal modifications.
+        // In delta mode (pre_storage_root != null) keep zero values as deletion markers
+        // so computeStorageRoot() can apply the MPT delete operation.
         var stor_it = account.storage.iterator();
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
             const present = slot.value_ptr.*.present_value;
             if (present == 0) {
-                _ = acct.storage.remove(key);
+                if (acct.pre_storage_root != null) {
+                    try acct.storage.put(arena, key, 0); // deletion marker for MPT update
+                } else {
+                    _ = acct.storage.remove(key);
+                }
             } else {
                 try acct.storage.put(arena, key, present);
             }

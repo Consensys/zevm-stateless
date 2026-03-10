@@ -61,7 +61,7 @@ pub fn writeResultJson(
     difficulty: u256,
 ) !void {
     const logs_hash = try executor_output.computeLogsHash(alloc, result.receipts);
-    const state_root = try executor_output.computeStateRoot(alloc, result.alloc);
+    const state_root = try executor_output.computeStateRoot(alloc, result.alloc, &.{});
     const tx_root = try executor_output.computeTxRoot(alloc, result.accepted_txs, result.chain_id);
     const receipts_root = try executor_output.computeReceiptsRoot(alloc, result.receipts);
 

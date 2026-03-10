@@ -179,7 +179,7 @@ pub fn runFixture(
             ) catch continue;
 
             // Compute post-state root.
-            const post_state_root = executor_output.computeStateRoot(alloc, result.alloc) catch [_]u8{0} ** 32;
+            const post_state_root = executor_output.computeStateRoot(alloc, result.alloc, &.{}) catch [_]u8{0} ** 32;
 
             // Pre-Byzantium: per-tx state roots are now computed inside transition().
             // Each receipt already has .state_root set correctly.

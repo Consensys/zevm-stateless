@@ -1,5 +1,59 @@
+/// Return a human-readable name for a SpecId (e.g. .prague → "Prague").
+pub fn specName(spec: primitives.SpecId) []const u8 {
+    return switch (spec) {
+        .frontier, .frontier_thawing => "Frontier",
+        .homestead                   => "Homestead",
+        .dao_fork                    => "DAO",
+        .tangerine                   => "EIP150",
+        .spurious_dragon             => "EIP158",
+        .byzantium                   => "Byzantium",
+        .constantinople              => "Constantinople",
+        .petersburg                  => "Petersburg",
+        .istanbul                    => "Istanbul",
+        .muir_glacier                => "MuirGlacier",
+        .berlin                      => "Berlin",
+        .london                      => "London",
+        .arrow_glacier               => "ArrowGlacier",
+        .gray_glacier                => "GrayGlacier",
+        .merge                       => "Paris",
+        .shanghai                    => "Shanghai",
+        .cancun                      => "Cancun",
+        .prague                      => "Prague",
+        .osaka                       => "Osaka",
+        else                         => "Unknown",
+    };
+}
+
 /// Mainnet hardfork schedule: block/timestamp → SpecId + block reward.
+const std        = @import("std");
 const primitives = @import("primitives");
+
+/// Parse a fork name string (e.g. "Prague", "Cancun") into a SpecId.
+/// Returns null if the name is not recognised.
+pub fn specFromName(name: []const u8) ?primitives.SpecId {
+    const map = .{
+        .{ "Frontier",       primitives.SpecId.frontier },
+        .{ "Homestead",      primitives.SpecId.homestead },
+        .{ "EIP150",         primitives.SpecId.tangerine },
+        .{ "EIP158",         primitives.SpecId.spurious_dragon },
+        .{ "Byzantium",      primitives.SpecId.byzantium },
+        .{ "Constantinople", primitives.SpecId.constantinople },
+        .{ "Petersburg",     primitives.SpecId.petersburg },
+        .{ "Istanbul",       primitives.SpecId.istanbul },
+        .{ "Berlin",         primitives.SpecId.berlin },
+        .{ "London",         primitives.SpecId.london },
+        .{ "Paris",          primitives.SpecId.merge },
+        .{ "Merge",          primitives.SpecId.merge },
+        .{ "Shanghai",       primitives.SpecId.shanghai },
+        .{ "Cancun",         primitives.SpecId.cancun },
+        .{ "Prague",         primitives.SpecId.prague },
+        .{ "Osaka",          primitives.SpecId.osaka },
+    };
+    inline for (map) |entry| {
+        if (std.ascii.eqlIgnoreCase(name, entry[0])) return entry[1];
+    }
+    return null;
+}
 
 /// Return the SpecId for a mainnet block identified by its block number and timestamp.
 /// Timestamp-based forks (post-Merge) take priority over block-based ones.

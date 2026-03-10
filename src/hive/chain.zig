@@ -120,7 +120,7 @@ pub const Chain = struct {
         ) catch return; // execution error = invalid block, discard
 
         // ── Verify state root ─────────────────────────────────────────────────
-        const post_state_root = output_mod.computeStateRoot(alloc, result.alloc) catch return;
+        const post_state_root = output_mod.computeStateRoot(alloc, result.alloc, &.{}) catch return;
         if (!std.mem.eql(u8, &post_state_root, &hdr.state_root)) return;
 
         // Pre-Byzantium: per-tx state roots are computed inside transition().

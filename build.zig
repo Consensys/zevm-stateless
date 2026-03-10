@@ -73,6 +73,16 @@ pub fn build(b: *std.Build) void {
     mpt_mod.addImport("input", input_mod);
     mpt_mod.addImport("mpt_nibbles", mpt_nibbles_mod);
 
+    // rlp_decode — single source of truth for raw RLP → input types
+    const rlp_decode_mod = b.addModule("rlp_decode", .{
+        .root_source_file = b.path("src/rlp_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rlp_decode_mod.addImport("input",      input_mod);
+    rlp_decode_mod.addImport("primitives", primitives);
+    rlp_decode_mod.addImport("mpt",        mpt_mod);
+
     const db_mod = b.addModule("db", .{
         .root_source_file = b.path("src/db/main.zig"),
         .target = target,
@@ -149,6 +159,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("mpt", mpt_mod);
     exe.root_module.addImport("db", db_mod);
     exe.root_module.addImport("executor", executor_mod);
+    exe.root_module.addImport("rlp_decode", rlp_decode_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
     exe.addIncludePath(.{ .cwd_relative = crypto_include });
@@ -307,6 +318,7 @@ pub fn build(b: *std.Build) void {
     native_executor_output_mod.addImport("executor_types",       executor_types_mod);
     native_executor_output_mod.addImport("executor_rlp_encode",  executor_rlp_encode_mod);
     native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
+    native_executor_output_mod.addImport("mpt",                  mpt_mod);
 
     // executor_fork — mainnet hardfork schedule (block/timestamp → SpecId + reward)
     const executor_fork_mod = b.createModule(.{
@@ -316,14 +328,15 @@ pub fn build(b: *std.Build) void {
     });
     executor_fork_mod.addImport("primitives", local_primitives);
 
-    // native_executor_tx_decode — raw RLP tx bytes → TxInput (no ECDSA here)
+    // native_executor_tx_decode — raw RLP tx bytes → TxInput, or input.Transaction → TxInput
     const native_executor_tx_decode_mod = b.createModule(.{
         .root_source_file = b.path("src/executor/tx_decode.zig"),
         .target = target,
         .optimize = optimize,
     });
     native_executor_tx_decode_mod.addImport("executor_types", executor_types_mod);
-    native_executor_tx_decode_mod.addImport("mpt",            mpt_mod);
+    native_executor_tx_decode_mod.addImport("input",          input_mod);
+    native_executor_tx_decode_mod.addImport("rlp_decode",     rlp_decode_mod);
 
     // Deferred: wire executor_output into transition (output_mod created after transition_mod)
     native_executor_transition_mod.addImport("executor_output", native_executor_output_mod);

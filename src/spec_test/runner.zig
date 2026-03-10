@@ -479,7 +479,7 @@ pub fn runFixture(
                     continue;
                 };
 
-                const got_state = output_mod.computeStateRoot(ca, result.alloc) catch [_]u8{0} ** 32;
+                const got_state = output_mod.computeStateRoot(ca, result.alloc, &.{}) catch [_]u8{0} ** 32;
                 const got_logs = output_mod.computeLogsHash(ca, result.receipts) catch [_]u8{0} ** 32;
 
                 if (std.mem.eql(u8, &got_state, &exp_hash) and

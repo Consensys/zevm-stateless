@@ -159,7 +159,7 @@ pub fn parse(
     );
 
     // ── Compute stateRoot from alloc ──────────────────────────────────────────
-    const state_root = try output.computeStateRoot(arena, alloc_map);
+    const state_root = try output.computeStateRoot(arena, alloc_map, &.{});
 
     // ── Compute genesis block hash ────────────────────────────────────────────
     const genesis_hash = try computeBlockHash(arena, .{

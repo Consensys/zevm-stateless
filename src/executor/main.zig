@@ -24,6 +24,7 @@ const types          = @import("executor_types");
 pub fn executeBlock(
     alloc: std.mem.Allocator,
     stateless_input: input.StatelessInput,
+    fork_name: ?[]const u8,
 ) !output.ProofOutput {
     // 1. Verify witness proofs and obtain the pre-state root.
     const pre_state_root = try mpt.verifyWitness(stateless_input.witness);
@@ -59,9 +60,10 @@ pub fn executeBlock(
             const entry = try pre_alloc.getOrPut(alloc, addr);
             if (!entry.found_existing) {
                 entry.value_ptr.* = types.AllocAccount{
-                    .balance = account_state.balance,
-                    .nonce   = account_state.nonce,
-                    .code    = code,
+                    .balance          = account_state.balance,
+                    .nonce            = account_state.nonce,
+                    .code             = code,
+                    .pre_storage_root = account_state.storage_root,
                 };
             }
 
@@ -138,24 +140,37 @@ pub fn executeBlock(
     }
 
     // 4. Build Env from the block header.
-    const header = stateless_input.header;
-    const spec   = fork_mod.mainnetSpec(header.number, header.timestamp);
+    const header = stateless_input.block;
+    const spec = if (fork_name) |name| (fork_mod.specFromName(name) orelse fork_mod.mainnetSpec(header.number, header.timestamp)) else fork_mod.mainnetSpec(header.number, header.timestamp);
+
+    // Map input.Withdrawal → types.Withdrawal.
+    const withdrawals = try alloc.alloc(types.Withdrawal, stateless_input.withdrawals.len);
+    for (stateless_input.withdrawals, 0..) |wd, i| {
+        withdrawals[i] = .{
+            .index           = wd.index,
+            .validator_index = wd.validator_index,
+            .address         = wd.address,
+            .amount          = wd.amount,
+        };
+    }
+
     const env    = types.Env{
-        .coinbase                 = header.coinbase,
+        .coinbase                 = header.beneficiary,
         .gas_limit                = header.gas_limit,
         .number                   = header.number,
         .timestamp                = header.timestamp,
         .difficulty               = header.difficulty,
         .base_fee                 = header.base_fee_per_gas,
-        .random                   = header.prev_randao,
+        .random                   = header.mix_hash,
         .excess_blob_gas          = header.excess_blob_gas,
         .parent_beacon_block_root = header.parent_beacon_block_root,
+        .parent_hash              = header.parent_hash,
         .block_hashes             = block_hashes.items,
-        .withdrawals              = &.{},
+        .withdrawals              = withdrawals,
     };
 
-    // 5. Decode transactions and execute the block.
-    const txs    = try tx_decode.decodeTxs(alloc, stateless_input.transactions);
+    // 5. Map decoded transactions to TxInput and execute the block.
+    const txs    = try tx_decode.decodeTxsFromInput(alloc, stateless_input.transactions);
     const result = try transition_mod.transition(
         alloc, pre_alloc, env, txs, spec,
         1, // chain_id = mainnet
@@ -163,7 +178,7 @@ pub fn executeBlock(
     );
 
     // 6. Compute post-state and receipts roots.
-    const post_state_root = try output_mod.computeStateRoot(alloc, result.alloc);
+    const post_state_root = try output_mod.computeStateRootDelta(alloc, pre_state_root, result.alloc, stateless_input.witness.nodes);
     const receipts_root   = try output_mod.computeReceiptsRoot(alloc, result.receipts);
 
     // Map transition.Receipt → output.ReceiptData.
@@ -181,23 +196,24 @@ pub fn executeBlock(
         .post_state_root = post_state_root,
         .receipts_root   = receipts_root,
         .receipts        = receipts_data,
+        .fork_name       = fork_mod.specName(spec),
     };
 }
 
-/// Convert an Header into the zevm BlockEnv required for EVM execution.
-pub fn blockEnvFromHeader(header: input.Header) context.BlockEnv {
+/// Convert a BlockHeader into the zevm BlockEnv required for EVM execution.
+pub fn blockEnvFromHeader(header: input.BlockHeader) context.BlockEnv {
     var block_env = context.BlockEnv.default();
 
     block_env.number      = @as(primitives.U256, header.number);
-    block_env.beneficiary = header.coinbase;
+    block_env.beneficiary = header.beneficiary;
     block_env.timestamp   = @as(primitives.U256, header.timestamp);
     block_env.gas_limit   = header.gas_limit;
-    block_env.basefee     = header.base_fee_per_gas;
+    block_env.basefee     = header.base_fee_per_gas orelse 0;
     block_env.difficulty  = @as(primitives.U256, 0); // always 0 for PoS
-    block_env.prevrandao  = header.prev_randao;
+    block_env.prevrandao  = header.mix_hash;
 
     block_env.setBlobExcessGasAndPrice(
-        header.excess_blob_gas,
+        header.excess_blob_gas orelse 0,
         primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE,
     );
 

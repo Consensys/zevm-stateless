@@ -346,6 +346,42 @@ pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
     return witness.state_root;
 }
 
+/// Apply a state account write to an existing state trie rooted at `root`,
+/// using combined pool+extra lookups for chained updates.
+///
+/// `addr_key` is keccak256(address) — the 32-byte trie key.
+/// `account_rlp` is the RLP-encoded account; pass null to delete the account.
+pub fn updateAccountChained(
+    alloc: std.mem.Allocator,
+    root: *[32]u8,
+    addr_key: [32]u8,
+    account_rlp: ?[]const u8,
+    pool: []const []const u8,
+    extra: *std.ArrayListUnmanaged([]const u8),
+) (MptError || error{OutOfMemory})!void {
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&addr_key, &key_nibs);
+
+    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
+        if (account_rlp) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            try extra.append(alloc, leaf_rlp);
+            root.* = keccak256(leaf_rlp);
+        }
+        return;
+    }
+
+    const root_bytes = findNode(pool, root.*) orelse
+                       findNode(extra.items, root.*) orelse
+                       return error.InvalidProof;
+    const new_root_rlp = try updNodeEx(alloc, root_bytes, &key_nibs, account_rlp, pool, extra);
+    try extra.append(alloc, new_root_rlp);
+    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
+        EMPTY_TRIE_HASH
+    else
+        keccak256(new_root_rlp);
+}
+
 // ─── Private helpers ───────────────────────────────────────────────────────────
 
 const EMPTY_TRIE_HASH: primitives.Hash = .{
@@ -373,4 +409,463 @@ fn decodeUint256(bytes: []const u8) error{InvalidRlp}!u256 {
     var result: u256 = 0;
     for (bytes) |b| result = (result << 8) | b;
     return result;
+}
+
+// ─── MPT Update (stateless storage root computation) ─────────────────────────
+
+/// Apply a single storage slot write to an existing storage trie rooted at
+/// `old_root`, resolving existing nodes via the witness `pool`.
+///
+/// `slot` is the raw 32-byte storage key (keccak256'd internally).
+/// `new_value` = 0 means delete the slot from the trie.
+///
+/// Returns the new trie root hash.
+pub fn updateStorage(
+    alloc: std.mem.Allocator,
+    old_root: [32]u8,
+    slot: [32]u8,
+    new_value: u256,
+    pool: []const []const u8,
+) (MptError || error{OutOfMemory})![32]u8 {
+    const key_hash = keccak256(&slot);
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&key_hash, &key_nibs);
+
+    const new_val_enc: ?[]const u8 = if (new_value == 0) null else blk: {
+        break :blk try updRlpU256(alloc, new_value);
+    };
+
+    if (std.mem.eql(u8, &old_root, &EMPTY_TRIE_HASH)) {
+        if (new_val_enc) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            return keccak256(leaf_rlp);
+        }
+        return EMPTY_TRIE_HASH;
+    }
+
+    const root_bytes = findNode(pool, old_root) orelse return error.InvalidProof;
+    const new_root_rlp = try updNode(alloc, root_bytes, &key_nibs, new_val_enc, pool);
+    if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80) return EMPTY_TRIE_HASH;
+    return keccak256(new_root_rlp);
+}
+
+/// Apply a storage slot write, accumulating new trie nodes in `extra` so that
+/// multiple chained updates work correctly.  Pass the SAME `extra` for all
+/// updates on one account; it accumulates new node bytes across calls so that
+/// each subsequent update can resolve the new root and intermediate nodes that
+/// were produced by previous updates.
+pub fn updateStorageChained(
+    alloc: std.mem.Allocator,
+    root: *[32]u8,
+    slot: [32]u8,
+    new_value: u256,
+    pool: []const []const u8,
+    extra: *std.ArrayListUnmanaged([]const u8),
+) (MptError || error{OutOfMemory})!void {
+    const key_hash = keccak256(&slot);
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&key_hash, &key_nibs);
+
+    const new_val_enc: ?[]const u8 = if (new_value == 0) null else blk: {
+        break :blk try updRlpU256(alloc, new_value);
+    };
+
+    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
+        if (new_val_enc) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            try extra.append(alloc, leaf_rlp);
+            root.* = keccak256(leaf_rlp);
+        }
+        return;
+    }
+
+    // Find root in combined pool (original witness nodes + nodes produced by prior updates)
+    const root_bytes = findNode(pool, root.*) orelse
+                       findNode(extra.items, root.*) orelse
+                       return error.InvalidProof;
+    const new_root_rlp = try updNodeEx(alloc, root_bytes, &key_nibs, new_val_enc, pool, extra);
+    // Store new root in extra so the next update can find it
+    try extra.append(alloc, new_root_rlp);
+    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
+        EMPTY_TRIE_HASH
+    else
+        keccak256(new_root_rlp);
+}
+
+/// Recursively update a node and return its new RLP bytes.
+/// Returns `&.{0x80}` (empty node) when the subtree becomes empty.
+fn updNode(
+    alloc: std.mem.Allocator,
+    node_rlp: []const u8,
+    remaining: []const u8,
+    new_val: ?[]const u8,
+    pool: []const []const u8,
+) (MptError || error{OutOfMemory})![]const u8 {
+    // Empty node
+    if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
+        if (new_val) |val| return updMakeLeaf(alloc, remaining, val);
+        return alloc.dupe(u8, &.{0x80});
+    }
+
+    const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
+        error.InvalidRlp  => return error.InvalidRlp,
+        error.InvalidNode => return error.InvalidNode,
+    };
+
+    switch (decoded) {
+        .branch => |b| {
+            if (remaining.len == 0) {
+                // Update branch value slot (rare in Ethereum storage tries)
+                var enc: [16][]const u8 = undefined;
+                for (b.children, 0..) |child, i| enc[i] = try updRefEnc(alloc, child);
+                return updEncodeBranch(alloc, &enc, new_val orelse &.{});
+            }
+            const nib = remaining[0];
+            const child_rlp = try updResolveRef(b.children[nib], pool);
+            const new_child_rlp = try updNode(alloc, child_rlp, remaining[1..], new_val, pool);
+            const new_child_enc = try updHashOrEmbed(alloc, new_child_rlp);
+            var enc: [16][]const u8 = undefined;
+            for (b.children, 0..) |child, i| {
+                if (i == nib) enc[i] = new_child_enc
+                else enc[i] = try updRefEnc(alloc, child);
+            }
+            return updEncodeBranch(alloc, &enc, b.value);
+        },
+
+        .extension => |e| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+            if (hp.is_leaf) return error.InvalidNode;
+            const prefix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(prefix, remaining);
+
+            if (cp == prefix.len) {
+                // Full prefix match: recurse into child
+                const child_rlp = try updResolveRef(e.child, pool);
+                const new_child_rlp = try updNode(alloc, child_rlp, remaining[cp..], new_val, pool);
+                if (new_child_rlp.len == 1 and new_child_rlp[0] == 0x80)
+                    return alloc.dupe(u8, &.{0x80});
+                const new_child_ref = try updHashOrEmbed(alloc, new_child_rlp);
+                return updMakeExtension(alloc, prefix, new_child_ref);
+            }
+
+            // Partial prefix match: split extension at position `cp`
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            // Old extension tail goes into branch
+            const old_nib = prefix[cp];
+            if (cp + 1 < prefix.len) {
+                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1..], try updRefEnc(alloc, e.child));
+                children_enc[old_nib] = try updHashOrEmbed(alloc, ext_rlp);
+            } else {
+                children_enc[old_nib] = try updRefEnc(alloc, e.child);
+            }
+            // New key tail
+            if (new_val) |val| {
+                if (cp < remaining.len) {
+                    const new_nib = remaining[cp];
+                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], val);
+                    children_enc[new_nib] = try updHashOrEmbed(alloc, leaf_rlp);
+                } else {
+                    branch_val = val;
+                }
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbed(alloc, branch_rlp);
+            return updMakeExtension(alloc, prefix[0..cp], branch_ref);
+        },
+
+        .leaf => |lf| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+            if (!hp.is_leaf) return error.InvalidNode;
+            const suffix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(suffix, remaining);
+
+            if (cp == suffix.len and cp == remaining.len) {
+                // Full key match: update or delete
+                if (new_val) |val| return updMakeLeaf(alloc, suffix, val);
+                return alloc.dupe(u8, &.{0x80});
+            }
+
+            if (new_val == null) {
+                // Deleting a non-existent key: return leaf unchanged
+                return updMakeLeaf(alloc, suffix, lf.value);
+            }
+
+            // Divergence: split into branch (+ optional extension)
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            if (cp < suffix.len) {
+                const old_nib = suffix[cp];
+                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1..], lf.value);
+                children_enc[old_nib] = try updHashOrEmbed(alloc, old_leaf_rlp);
+            } else {
+                branch_val = lf.value; // existing leaf ends exactly at the branch
+            }
+            if (cp < remaining.len) {
+                const new_nib = remaining[cp];
+                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], new_val.?);
+                children_enc[new_nib] = try updHashOrEmbed(alloc, new_leaf_rlp);
+            } else {
+                branch_val = new_val.?; // new key ends exactly at the branch
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbed(alloc, branch_rlp);
+            return updMakeExtension(alloc, suffix[0..cp], branch_ref);
+        },
+    }
+}
+
+/// Like updNode but uses combined pool+extra lookups and deposits new nodes into extra.
+fn updNodeEx(
+    alloc: std.mem.Allocator,
+    node_rlp: []const u8,
+    remaining: []const u8,
+    new_val: ?[]const u8,
+    pool: []const []const u8,
+    extra: *std.ArrayListUnmanaged([]const u8),
+) (MptError || error{OutOfMemory})![]const u8 {
+    if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
+        if (new_val) |val| return updMakeLeaf(alloc, remaining, val);
+        return alloc.dupe(u8, &.{0x80});
+    }
+
+    const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
+        error.InvalidRlp  => return error.InvalidRlp,
+        error.InvalidNode => return error.InvalidNode,
+    };
+
+    switch (decoded) {
+        .branch => |b| {
+            if (remaining.len == 0) {
+                var enc: [16][]const u8 = undefined;
+                for (b.children, 0..) |child, i| enc[i] = try updRefEnc(alloc, child);
+                return updEncodeBranch(alloc, &enc, new_val orelse &.{});
+            }
+            const nib = remaining[0];
+            const child_rlp = try updResolveRefEx(b.children[nib], pool, extra.items);
+            const new_child_rlp = try updNodeEx(alloc, child_rlp, remaining[1..], new_val, pool, extra);
+            const new_child_enc = try updHashOrEmbedEx(alloc, new_child_rlp, extra);
+            var enc: [16][]const u8 = undefined;
+            for (b.children, 0..) |child, i| {
+                if (i == nib) enc[i] = new_child_enc
+                else enc[i] = try updRefEnc(alloc, child);
+            }
+            return updEncodeBranch(alloc, &enc, b.value);
+        },
+
+        .extension => |e| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+            if (hp.is_leaf) return error.InvalidNode;
+            const prefix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(prefix, remaining);
+
+            if (cp == prefix.len) {
+                const child_rlp = try updResolveRefEx(e.child, pool, extra.items);
+                const new_child_rlp = try updNodeEx(alloc, child_rlp, remaining[cp..], new_val, pool, extra);
+                if (new_child_rlp.len == 1 and new_child_rlp[0] == 0x80)
+                    return alloc.dupe(u8, &.{0x80});
+                const new_child_ref = try updHashOrEmbedEx(alloc, new_child_rlp, extra);
+                return updMakeExtension(alloc, prefix, new_child_ref);
+            }
+
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            const old_nib = prefix[cp];
+            if (cp + 1 < prefix.len) {
+                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1..], try updRefEnc(alloc, e.child));
+                children_enc[old_nib] = try updHashOrEmbedEx(alloc, ext_rlp, extra);
+            } else {
+                children_enc[old_nib] = try updRefEnc(alloc, e.child);
+            }
+            if (new_val) |val| {
+                if (cp < remaining.len) {
+                    const new_nib = remaining[cp];
+                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], val);
+                    children_enc[new_nib] = try updHashOrEmbedEx(alloc, leaf_rlp, extra);
+                } else {
+                    branch_val = val;
+                }
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbedEx(alloc, branch_rlp, extra);
+            return updMakeExtension(alloc, prefix[0..cp], branch_ref);
+        },
+
+        .leaf => |lf| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+            if (!hp.is_leaf) return error.InvalidNode;
+            const suffix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(suffix, remaining);
+
+            if (cp == suffix.len and cp == remaining.len) {
+                if (new_val) |val| return updMakeLeaf(alloc, suffix, val);
+                return alloc.dupe(u8, &.{0x80});
+            }
+
+            if (new_val == null) {
+                return updMakeLeaf(alloc, suffix, lf.value);
+            }
+
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            if (cp < suffix.len) {
+                const old_nib = suffix[cp];
+                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1..], lf.value);
+                children_enc[old_nib] = try updHashOrEmbedEx(alloc, old_leaf_rlp, extra);
+            } else {
+                branch_val = lf.value;
+            }
+            if (cp < remaining.len) {
+                const new_nib = remaining[cp];
+                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], new_val.?);
+                children_enc[new_nib] = try updHashOrEmbedEx(alloc, new_leaf_rlp, extra);
+            } else {
+                branch_val = new_val.?;
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbedEx(alloc, branch_rlp, extra);
+            return updMakeExtension(alloc, suffix[0..cp], branch_ref);
+        },
+    }
+}
+
+// ─── Update helpers ───────────────────────────────────────────────────────────
+
+fn updResolveRef(ref: node.NodeRef, pool: []const []const u8) MptError![]const u8 {
+    return switch (ref) {
+        .empty       => &.{0x80},
+        .hash        => |h| findNode(pool, h) orelse return error.InvalidProof,
+        .inline_node => |b| b,
+    };
+}
+
+fn updResolveRefEx(ref: node.NodeRef, pool: []const []const u8, extra_items: []const []const u8) MptError![]const u8 {
+    return switch (ref) {
+        .empty       => &.{0x80},
+        .hash        => |h| findNode(pool, h) orelse findNode(extra_items, h) orelse return error.InvalidProof,
+        .inline_node => |b| b,
+    };
+}
+
+fn updRefEnc(alloc: std.mem.Allocator, ref: node.NodeRef) ![]const u8 {
+    return switch (ref) {
+        .empty       => alloc.dupe(u8, &.{0x80}),
+        .hash        => |h| updRlpBytes(alloc, &h),
+        .inline_node => |b| b,
+    };
+}
+
+/// Compute the parent-node reference encoding for a child node.
+/// If the child RLP is < 32 bytes: embed inline (return as-is).
+/// If >= 32 bytes: return RLP-encoded keccak256 hash.
+fn updHashOrEmbed(alloc: std.mem.Allocator, node_rlp: []const u8) ![]const u8 {
+    if (node_rlp.len < 32) return node_rlp;
+    const h = keccak256(node_rlp);
+    return updRlpBytes(alloc, &h);
+}
+
+/// Like updHashOrEmbed but also deposits the hashed node into `extra` so
+/// subsequent chained updates can resolve it.
+fn updHashOrEmbedEx(alloc: std.mem.Allocator, node_rlp: []const u8, extra: *std.ArrayListUnmanaged([]const u8)) ![]const u8 {
+    if (node_rlp.len < 32) return node_rlp;
+    try extra.append(alloc, node_rlp);
+    const h = keccak256(node_rlp);
+    return updRlpBytes(alloc, &h);
+}
+
+fn updMakeLeaf(alloc: std.mem.Allocator, path_nibs: []const u8, value: []const u8) ![]const u8 {
+    var hp_buf: [65]u8 = undefined;
+    const hp = nibbles.hpEncode(path_nibs, true, &hp_buf);
+    const items = [_][]const u8{ try updRlpBytes(alloc, hp), try updRlpBytes(alloc, value) };
+    return updRlpList(alloc, &items);
+}
+
+fn updMakeExtension(alloc: std.mem.Allocator, path_nibs: []const u8, child_ref: []const u8) ![]const u8 {
+    var hp_buf: [65]u8 = undefined;
+    const hp = nibbles.hpEncode(path_nibs, false, &hp_buf);
+    const items = [_][]const u8{ try updRlpBytes(alloc, hp), child_ref };
+    return updRlpList(alloc, &items);
+}
+
+fn updEncodeBranch(
+    alloc: std.mem.Allocator,
+    children_enc: *const [16][]const u8,
+    value: []const u8,
+) ![]const u8 {
+    var items: [17][]const u8 = undefined;
+    for (children_enc, 0..) |enc, i| items[i] = enc;
+    items[16] = try updRlpBytes(alloc, value);
+    return updRlpList(alloc, &items);
+}
+
+fn updRlpU256(alloc: std.mem.Allocator, v: u256) ![]const u8 {
+    var buf: [32]u8 = undefined;
+    std.mem.writeInt(u256, &buf, v, .big);
+    var start: usize = 0;
+    while (start < 32 and buf[start] == 0) start += 1;
+    return updRlpBytes(alloc, buf[start..]);
+}
+
+fn updRlpBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
+    if (data.len == 1 and data[0] < 0x80) return alloc.dupe(u8, data);
+    if (data.len == 0) return alloc.dupe(u8, &.{0x80});
+    if (data.len <= 55) {
+        const out = try alloc.alloc(u8, 1 + data.len);
+        out[0] = @intCast(0x80 + data.len);
+        @memcpy(out[1..], data);
+        return out;
+    }
+    var len_buf: [8]u8 = undefined;
+    var lv = data.len;
+    var lc: usize = 0;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    lv = data.len;
+    var li = lc;
+    while (li > 0) : (li -= 1) { len_buf[li - 1] = @intCast(lv & 0xff); lv >>= 8; }
+    const out = try alloc.alloc(u8, 1 + lc + data.len);
+    out[0] = @intCast(0xb7 + lc);
+    @memcpy(out[1..][0..lc], len_buf[0..lc]);
+    @memcpy(out[1 + lc..], data);
+    return out;
+}
+
+fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
+    var total: usize = 0;
+    for (items) |item| total += item.len;
+    if (total <= 55) {
+        const out = try alloc.alloc(u8, 1 + total);
+        out[0] = @intCast(0xc0 + total);
+        var pos: usize = 1;
+        for (items) |item| { @memcpy(out[pos..][0..item.len], item); pos += item.len; }
+        return out;
+    }
+    var len_buf: [8]u8 = undefined;
+    var lv = total;
+    var lc: usize = 0;
+    while (lv > 0) : (lv >>= 8) lc += 1;
+    lv = total;
+    var li = lc;
+    while (li > 0) : (li -= 1) { len_buf[li - 1] = @intCast(lv & 0xff); lv >>= 8; }
+    const out = try alloc.alloc(u8, 1 + lc + total);
+    out[0] = @intCast(0xf7 + lc);
+    @memcpy(out[1..][0..lc], len_buf[0..lc]);
+    var pos: usize = 1 + lc;
+    for (items) |item| { @memcpy(out[pos..][0..item.len], item); pos += item.len; }
+    return out;
 }

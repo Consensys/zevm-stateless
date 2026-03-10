@@ -1,12 +1,14 @@
 /// Trie root computations for EVM state transition output.
 ///
-/// Provides computeStateRoot(), computeReceiptsRoot(), computeLogsHash(),
+/// Provides computeStateRootDelta() (stateless delta mode), computeStateRoot()
+/// (full-state scratch mode), computeReceiptsRoot(), computeLogsHash(),
 /// and computeTxRoot() for post-execution state and receipt verification.
 const std = @import("std");
 
 const types = @import("executor_types");
 const rlp = @import("executor_rlp_encode");
 const mpt_builder = @import("mpt_builder");
+const mpt = @import("mpt");
 
 // ─── Logs hash ────────────────────────────────────────────────────────────────
 
@@ -70,10 +72,54 @@ pub fn computeReceiptsRoot(
     return mpt_builder.trieRoot(alloc, items);
 }
 
+/// stateRoot for stateless execution: applies account changes as MPT delta updates
+/// against `pre_state_root`, using `pool` (the witness node pool) to resolve existing nodes.
+///
+/// This correctly handles a witness that only contains touched accounts — the untouched
+/// accounts remain implicit in the trie via their existing hash references.
+pub fn computeStateRootDelta(
+    alloc: std.mem.Allocator,
+    pre_state_root: [32]u8,
+    alloc_map: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
+    pool: []const []const u8,
+) ![32]u8 {
+    var state_root = pre_state_root;
+    var extra = std.ArrayListUnmanaged([]const u8){};
+    defer extra.deinit(alloc);
+
+    var it = alloc_map.iterator();
+    while (it.next()) |entry| {
+        const addr = entry.key_ptr.*;
+        const acct = entry.value_ptr.*;
+        const addr_key = mpt_builder.keccak256(&addr);
+
+        const storage_root = try computeStorageRoot(alloc, acct, pool);
+        const code_hash: [32]u8 = if (acct.code.len > 0)
+            mpt_builder.keccak256(acct.code)
+        else
+            KECCAK_EMPTY;
+
+        // EIP-161: delete empty accounts (nonce=0, balance=0, no code, empty storage).
+        const account_rlp: ?[]const u8 = if (acct.nonce == 0 and
+            acct.balance == 0 and
+            acct.code.len == 0 and
+            std.mem.eql(u8, &storage_root, &mpt_builder.EMPTY_TRIE_HASH))
+            null
+        else
+            try encodeAccountRlp(alloc, acct.nonce, acct.balance, storage_root, code_hash);
+
+        try mpt.updateAccountChained(alloc, &state_root, addr_key, account_rlp, pool, &extra);
+    }
+    return state_root;
+}
+
 /// stateRoot: state trie, keys = keccak256(address), values = account RLP.
+/// `pool` is the MPT witness node pool; used for accounts whose `pre_storage_root` is set.
+/// Pass `&.{}` (empty slice) when no witness is available (all roots built from scratch).
 pub fn computeStateRoot(
     alloc: std.mem.Allocator,
     alloc_map: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
+    pool: []const []const u8,
 ) ![32]u8 {
     const count = alloc_map.count();
     if (count == 0) return mpt_builder.EMPTY_TRIE_HASH;
@@ -86,7 +132,7 @@ pub fn computeStateRoot(
         // key = keccak256(address)
         const key = try alloc.dupe(u8, &mpt_builder.keccak256(&addr));
         // storage trie root
-        const storage_root = try computeStorageRoot(alloc, acct.storage);
+        const storage_root = try computeStorageRoot(alloc, acct, pool);
         // code hash
         const code_hash: [32]u8 = if (acct.code.len > 0)
             mpt_builder.keccak256(acct.code)
@@ -102,15 +148,35 @@ pub fn computeStateRoot(
 
 fn computeStorageRoot(
     alloc: std.mem.Allocator,
-    storage: std.AutoHashMapUnmanaged(u256, u256),
+    account: types.AllocAccount,
+    pool: []const []const u8,
 ) ![32]u8 {
+    if (account.pre_storage_root) |old_root| {
+        // Delta mode: apply each touched slot as an update to the proven pre-state root.
+        // Zero-valued entries indicate deletions; non-zero entries are insertions/updates.
+        // Use updateStorageChained so that multiple updates on the same account work
+        // correctly: new intermediate nodes are accumulated in `extra` and reused by
+        // subsequent updates within the same account.
+        var root = old_root;
+        var extra = std.ArrayListUnmanaged([]const u8){};
+        defer extra.deinit(alloc);
+        var it = account.storage.iterator();
+        while (it.next()) |entry| {
+            var slot_key: [32]u8 = undefined;
+            std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
+            try mpt.updateStorageChained(alloc, &root, slot_key, entry.value_ptr.*, pool, &extra);
+        }
+        return root;
+    }
+    // Scratch mode: build the storage trie from all non-zero slots.
+    const storage = account.storage;
     const count = storage.count();
     if (count == 0) return mpt_builder.EMPTY_TRIE_HASH;
     var items = try alloc.alloc(mpt_builder.KV, count);
     var it = storage.iterator();
     var i: usize = 0;
     while (it.next()) |entry| {
-        if (entry.value_ptr.* == 0) continue; // skip zero slots
+        if (entry.value_ptr.* == 0) continue;
         var slot_key: [32]u8 = undefined;
         std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
         items[i].key = try alloc.dupe(u8, &mpt_builder.keccak256(&slot_key));
