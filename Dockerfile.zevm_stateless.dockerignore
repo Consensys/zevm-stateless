@@ -1,0 +1,6 @@
+# Exclude large build artifacts and test fixtures from the Docker build context
+zevm-stateless/.zig-cache
+zevm-stateless/zig-out
+zevm-stateless/spec-tests
+zevm/.zig-cache
+zevm/zig-out

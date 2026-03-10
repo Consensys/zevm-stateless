@@ -1,0 +1,9 @@
+# Test fixtures are large and not needed for the build
+test/fixtures/
+
+# Zig build artifacts
+.zig-cache/
+zig-out/
+
+# Git history
+.git/

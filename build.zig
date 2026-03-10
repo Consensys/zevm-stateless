@@ -4,6 +4,13 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
+    // Platform-aware crypto library prefix: Homebrew on macOS, /usr/local on Linux
+    const is_linux = b.graph.host.result.os.tag == .linux;
+    const crypto_prefix = if (is_linux) "/usr/local" else "/opt/homebrew";
+    const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
+    const libblst_path   = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
+    const libmcl_path    = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+
     // Build options — crypto libraries are disabled by default for zkVM targets
     const lib_options = b.addOptions();
     lib_options.addOption(bool, "enable_blst", false);
@@ -50,6 +57,13 @@ pub fn build(b: *std.Build) void {
     });
     output_mod.addImport("primitives", primitives);
 
+    // mpt_nibbles: shared nibble utilities — standalone so mpt and mpt_builder can both use it
+    const mpt_nibbles_mod = b.createModule(.{
+        .root_source_file = b.path("src/mpt/nibbles.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const mpt_mod = b.addModule("mpt", .{
         .root_source_file = b.path("src/mpt/main.zig"),
         .target = target,
@@ -57,6 +71,17 @@ pub fn build(b: *std.Build) void {
     });
     mpt_mod.addImport("primitives", primitives);
     mpt_mod.addImport("input", input_mod);
+    mpt_mod.addImport("mpt_nibbles", mpt_nibbles_mod);
+
+    // rlp_decode — single source of truth for raw RLP → input types
+    const rlp_decode_mod = b.addModule("rlp_decode", .{
+        .root_source_file = b.path("src/rlp_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    rlp_decode_mod.addImport("input",      input_mod);
+    rlp_decode_mod.addImport("primitives", primitives);
+    rlp_decode_mod.addImport("mpt",        mpt_mod);
 
     const db_mod = b.addModule("db", .{
         .root_source_file = b.path("src/db/main.zig"),
@@ -69,18 +94,33 @@ pub fn build(b: *std.Build) void {
     db_mod.addImport("mpt", mpt_mod);
     db_mod.addImport("input", input_mod);
 
+    // mpt_builder: standalone trie builder (shares nibbles with mpt via mpt_nibbles)
+    const mpt_builder_mod = b.addModule("mpt_builder", .{
+        .root_source_file = b.path("src/mpt/builder.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    mpt_builder_mod.addImport("mpt_nibbles", mpt_nibbles_mod);
+
     const executor_mod = b.addModule("executor", .{
         .root_source_file = b.path("src/executor/main.zig"),
         .target = target,
         .optimize = optimize,
     });
     executor_mod.addImport("primitives", primitives);
+    executor_mod.addImport("state", state);
+    executor_mod.addImport("bytecode", bytecode);
+    executor_mod.addImport("database", database);
     executor_mod.addImport("context", context);
     executor_mod.addImport("handler", handler);
+    executor_mod.addImport("precompile", precompile);
     executor_mod.addImport("mpt", mpt_mod);
+    executor_mod.addImport("mpt_builder", mpt_builder_mod);
     executor_mod.addImport("db", db_mod);
     executor_mod.addImport("input", input_mod);
     executor_mod.addImport("output", output_mod);
+    // Note: named executor sub-modules (executor_fork, executor_tx_decode, etc.)
+    // are added further below, after those module variables are created.
 
     const mod = b.addModule("zevm_stateless", .{
         .root_source_file = b.path("src/root.zig"),
@@ -119,6 +159,18 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("mpt", mpt_mod);
     exe.root_module.addImport("db", db_mod);
     exe.root_module.addImport("executor", executor_mod);
+    exe.root_module.addImport("rlp_decode", rlp_decode_mod);
+
+    // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
+    exe.addIncludePath(.{ .cwd_relative = crypto_include });
+    exe.linkSystemLibrary("secp256k1");
+    exe.linkSystemLibrary("ssl");
+    exe.linkSystemLibrary("crypto");
+    exe.linkSystemLibrary("c");
+    exe.linkSystemLibrary("m");
+    exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    exe.addObjectFile(.{ .cwd_relative = libmcl_path });
+    exe.linkLibCpp();
 
     b.installArtifact(exe);
 
@@ -221,14 +273,89 @@ pub fn build(b: *std.Build) void {
 
     // Enable blst and mcl for native tools: override build_options and expose headers
     local_precompile.addImport("build_options", native_lib_options_module);
-    local_precompile.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    local_precompile.addIncludePath(.{ .cwd_relative = crypto_include });
 
-    // mpt_builder: standalone trie builder (no external deps)
-    const mpt_builder_mod = b.addModule("mpt_builder", .{
-        .root_source_file = b.path("src/mpt/builder.zig"),
+    // ── Named executor modules for t8n / spec-test ───────────────────────────────
+    // These expose executor/ source files as named imports so that t8n and spec-test
+    // can import them without crossing module-root boundaries.
+
+    // executor_types — canonical EVM type definitions; no external deps
+    const executor_types_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/types.zig"),
         .target = target,
         .optimize = optimize,
     });
+
+    // executor_rlp_encode — RLP encoding primitives; shared by transition and output
+    const executor_rlp_encode_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/rlp_encode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
+    // native_executor_transition — transition logic using crypto-enabled local zevm
+    const native_executor_transition_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/transition.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_transition_mod.addImport("executor_types",      executor_types_mod);
+    native_executor_transition_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
+    native_executor_transition_mod.addImport("primitives",          local_primitives);
+    native_executor_transition_mod.addImport("state",          local_state);
+    native_executor_transition_mod.addImport("bytecode",       local_bytecode);
+    native_executor_transition_mod.addImport("database",       local_database);
+    native_executor_transition_mod.addImport("context",        local_context);
+    native_executor_transition_mod.addImport("handler",        local_handler);
+    native_executor_transition_mod.addImport("precompile",     local_precompile);
+
+    // native_executor_output — trie computations; uses executor_transition for type consistency
+    const native_executor_output_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/output.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_output_mod.addImport("executor_types",       executor_types_mod);
+    native_executor_output_mod.addImport("executor_rlp_encode",  executor_rlp_encode_mod);
+    native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
+    native_executor_output_mod.addImport("mpt",                  mpt_mod);
+
+    // executor_fork — mainnet hardfork schedule (block/timestamp → SpecId + reward)
+    const executor_fork_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/fork.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_fork_mod.addImport("primitives", local_primitives);
+
+    // native_executor_tx_decode — raw RLP tx bytes → TxInput, or input.Transaction → TxInput
+    const native_executor_tx_decode_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/tx_decode.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    native_executor_tx_decode_mod.addImport("executor_types", executor_types_mod);
+    native_executor_tx_decode_mod.addImport("input",          input_mod);
+    native_executor_tx_decode_mod.addImport("rlp_decode",     rlp_decode_mod);
+
+    // Deferred: wire executor_output into transition (output_mod created after transition_mod)
+    native_executor_transition_mod.addImport("executor_output", native_executor_output_mod);
+
+    // Wire named executor sub-modules into executor_mod (deferred — modules created above)
+    executor_mod.addImport("executor_types",      executor_types_mod);
+    executor_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
+    executor_mod.addImport("executor_transition", native_executor_transition_mod);
+    executor_mod.addImport("executor_output",     native_executor_output_mod);
+    executor_mod.addImport("executor_fork",       executor_fork_mod);
+    executor_mod.addImport("executor_tx_decode",  native_executor_tx_decode_mod);
+
+    // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
+    const t8n_input_mod = b.createModule(.{
+        .root_source_file = b.path("src/t8n/input.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    t8n_input_mod.addImport("executor_types", executor_types_mod);
 
     const t8n_exe = b.addExecutable(.{
         .name = "t8n",
@@ -237,27 +364,30 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",  .module = local_primitives  },
-                .{ .name = "state",       .module = local_state       },
-                .{ .name = "bytecode",    .module = local_bytecode    },
-                .{ .name = "database",    .module = local_database    },
-                .{ .name = "context",     .module = local_context     },
-                .{ .name = "handler",     .module = local_handler     },
-                .{ .name = "precompile",  .module = local_precompile  },
-                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
             },
         }),
     });
     // secp256k1_recovery.h and secp256k1.h are in the Homebrew include path.
     // OpenSSL headers and libraries are also required by zevm_local's precompile module.
-    t8n_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    t8n_exe.addIncludePath(.{ .cwd_relative = crypto_include });
     t8n_exe.linkSystemLibrary("secp256k1");
     t8n_exe.linkSystemLibrary("ssl");
     t8n_exe.linkSystemLibrary("crypto");
     t8n_exe.linkSystemLibrary("c");
     t8n_exe.linkSystemLibrary("m");
-    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
-    t8n_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    t8n_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    t8n_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
     t8n_exe.linkLibCpp();
 
     b.installArtifact(t8n_exe);
@@ -276,7 +406,7 @@ pub fn build(b: *std.Build) void {
     // from indexed transaction fields + transaction.sender (no ECDSA), calls
     // transition() directly, and compares stateRoot + logsHash to expected values.
     //
-    // Usage: zig build spec-tests [-- --fork Cancun --file path/to/fixture.json -x]
+    // Usage: zig build state-tests [-- --fork Cancun --file path/to/fixture.json -x]
     // Fixtures dir: spec-tests/fixtures/state_tests (download with: zig build fetch-fixtures)
     // ---------------------------------------------------------------------------
     const spec_test_exe = b.addExecutable(.{
@@ -286,34 +416,174 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",  .module = local_primitives  },
-                .{ .name = "state",       .module = local_state       },
-                .{ .name = "bytecode",    .module = local_bytecode    },
-                .{ .name = "database",    .module = local_database    },
-                .{ .name = "context",     .module = local_context     },
-                .{ .name = "handler",     .module = local_handler     },
-                .{ .name = "precompile",  .module = local_precompile  },
-                .{ .name = "mpt_builder", .module = mpt_builder_mod   },
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "t8n_input",           .module = t8n_input_mod                  },
             },
         }),
     });
-    spec_test_exe.addIncludePath(.{ .cwd_relative = "/opt/homebrew/include" });
+    spec_test_exe.addIncludePath(.{ .cwd_relative = crypto_include });
     spec_test_exe.linkSystemLibrary("secp256k1");
     spec_test_exe.linkSystemLibrary("ssl");
     spec_test_exe.linkSystemLibrary("crypto");
     spec_test_exe.linkSystemLibrary("c");
     spec_test_exe.linkSystemLibrary("m");
-    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libblst.a" });
-    spec_test_exe.addObjectFile(.{ .cwd_relative = "/opt/homebrew/lib/libmcl.a" });
+    spec_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    spec_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
     spec_test_exe.linkLibCpp();
 
     b.installArtifact(spec_test_exe);
 
-    const run_spec_tests_step = b.step("spec-tests", "Run execution-spec-tests state fixtures");
+    const run_state_tests_step = b.step("state-tests", "Run execution-spec-tests state fixtures");
     const run_spec_tests_cmd = b.addRunArtifact(spec_test_exe);
     run_spec_tests_cmd.step.dependOn(b.getInstallStep());
     if (b.args) |args| run_spec_tests_cmd.addArgs(args);
-    run_spec_tests_step.dependOn(&run_spec_tests_cmd.step);
+    run_state_tests_step.dependOn(&run_spec_tests_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // blockchain-test-runner — Ethereum blockchain test fixture runner
+    //
+    // Reads blockchain_tests JSON fixtures, executes each single-block test,
+    // and validates post_state_root, receipts_root, and lastblockhash.
+    //
+    // Usage: zig build blockchain-tests [-- --fork Cancun --file path/to/fixture.json -x -q]
+    // Fixtures dir: spec-tests/fixtures/blockchain_tests
+    // ---------------------------------------------------------------------------
+
+    // blockchain_test runner module
+    const blockchain_test_runner_mod = b.createModule(.{
+        .root_source_file = b.path("src/blockchain_test/runner.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    blockchain_test_runner_mod.addImport("primitives",           local_primitives);
+    blockchain_test_runner_mod.addImport("executor_types",       executor_types_mod);
+    blockchain_test_runner_mod.addImport("executor_transition",  native_executor_transition_mod);
+    blockchain_test_runner_mod.addImport("executor_output",      native_executor_output_mod);
+    blockchain_test_runner_mod.addImport("executor_fork",        executor_fork_mod);
+    blockchain_test_runner_mod.addImport("executor_tx_decode",   native_executor_tx_decode_mod);
+    blockchain_test_runner_mod.addImport("mpt",                  mpt_mod);
+
+    const bc_test_exe = b.addExecutable(.{
+        .name = "blockchain-test-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/blockchain_test_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "blockchain_test/runner.zig", .module = blockchain_test_runner_mod },
+            },
+        }),
+    });
+    bc_test_exe.addIncludePath(.{ .cwd_relative = crypto_include });
+    bc_test_exe.linkSystemLibrary("secp256k1");
+    bc_test_exe.linkSystemLibrary("ssl");
+    bc_test_exe.linkSystemLibrary("crypto");
+    bc_test_exe.linkSystemLibrary("c");
+    bc_test_exe.linkSystemLibrary("m");
+    bc_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    bc_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
+    bc_test_exe.linkLibCpp();
+
+    b.installArtifact(bc_test_exe);
+
+    const run_bc_tests_step = b.step("blockchain-tests", "Run Ethereum blockchain test fixtures");
+    const run_bc_tests_cmd = b.addRunArtifact(bc_test_exe);
+    run_bc_tests_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_bc_tests_cmd.addArgs(args);
+    run_bc_tests_step.dependOn(&run_bc_tests_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // all-spec-tests-runner — combined state + blockchain spec-test runner
+    //
+    // Spawns spec-test-runner and blockchain-test-runner as subprocesses and
+    // prints a unified summary across both suites.
+    //
+    // Usage: zig build spec-tests [-- --fork Cancun -q]
+    // ---------------------------------------------------------------------------
+    const all_spec_exe = b.addExecutable(.{
+        .name = "all-spec-tests-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/all_spec_tests_runner.zig"),
+            .target = target,
+            .optimize = optimize,
+        }),
+    });
+    b.installArtifact(all_spec_exe);
+
+    const run_spec_tests_step = b.step("spec-tests", "Run all spec-tests: state + blockchain");
+    const run_all_spec_cmd = b.addRunArtifact(all_spec_exe);
+    run_all_spec_cmd.step.dependOn(b.getInstallStep());
+    if (b.args) |args| run_all_spec_cmd.addArgs(args);
+    run_spec_tests_step.dependOn(&run_all_spec_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // hive-rlp — Hive consume-rlp execution client
+    //
+    // Reads /genesis.json and /blocks/*.rlp at startup, executes the chain,
+    // and serves eth_getBlockByNumber on :8545 for Hive validation.
+    //
+    // Usage: zig build hive-rlp
+    // ---------------------------------------------------------------------------
+    const hive_rlp_exe = b.addExecutable(.{
+        .name = "hive-rlp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/hive_rlp.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "primitives",          .module = local_primitives               },
+                .{ .name = "state",               .module = local_state                    },
+                .{ .name = "bytecode",            .module = local_bytecode                 },
+                .{ .name = "database",            .module = local_database                 },
+                .{ .name = "context",             .module = local_context                  },
+                .{ .name = "handler",             .module = local_handler                  },
+                .{ .name = "precompile",          .module = local_precompile               },
+                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
+                .{ .name = "mpt",                 .module = mpt_mod                        },
+                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod        },
+                .{ .name = "executor_transition", .module = native_executor_transition_mod },
+                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "executor_fork",       .module = executor_fork_mod              },
+                .{ .name = "executor_tx_decode",  .module = native_executor_tx_decode_mod  },
+            },
+        }),
+    });
+    hive_rlp_exe.addIncludePath(.{ .cwd_relative = crypto_include });
+    hive_rlp_exe.linkSystemLibrary("secp256k1");
+    hive_rlp_exe.linkSystemLibrary("ssl");
+    hive_rlp_exe.linkSystemLibrary("crypto");
+    hive_rlp_exe.linkSystemLibrary("c");
+    hive_rlp_exe.linkSystemLibrary("m");
+    hive_rlp_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    hive_rlp_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
+    hive_rlp_exe.linkLibCpp();
+
+    b.installArtifact(hive_rlp_exe);
+
+    const run_hive_rlp_step = b.step("hive-rlp", "Build and install the Hive consume-rlp client");
+    run_hive_rlp_step.dependOn(b.getInstallStep());
 
     // zig build fetch-fixtures — download execution-spec-tests v5.4.0 develop fixtures
     const fetch_fixtures_step = b.step("fetch-fixtures", "Download execution-spec-tests fixtures");

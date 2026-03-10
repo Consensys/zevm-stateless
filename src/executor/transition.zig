@@ -1,4 +1,4 @@
-/// Core state transition for the t8n tool.
+/// Core state transition for the EVM executor.
 ///
 /// Implements the Ethereum state transition function:
 ///   post_state, receipts = transition(pre_state, env, txs, fork, chain_id, reward)
@@ -12,44 +12,18 @@ const database_mod = @import("database");
 const context_mod = @import("context");
 const handler_mod = @import("handler");
 
-const input = @import("input.zig");
+const input = @import("executor_types");
 const bloom = @import("bloom.zig");
-const rlp = @import("rlp_encode.zig");
+const rlp = @import("executor_rlp_encode");
 const precompile_mod = @import("precompile");
 const secp_wrapper = precompile_mod.secp256k1_wrapper;
+const output_mod = @import("executor_output");
 
-// ─── Output types ─────────────────────────────────────────────────────────────
+// ─── Output types (re-exported from executor_types) ───────────────────────────
 
-pub const Log = struct {
-    address: input.Address,
-    topics: []input.Hash,
-    data: []const u8,
-    block_number: u64,
-    tx_hash: input.Hash,
-    tx_index: u64,
-    block_hash: input.Hash,
-    log_index: u64,
-    removed: bool = false,
-};
-
-pub const Receipt = struct {
-    type: u8,
-    tx_hash: input.Hash,
-    tx_index: u64,
-    block_hash: input.Hash,
-    block_number: u64,
-    from: input.Address,
-    to: ?input.Address,
-    cumulative_gas_used: u64,
-    gas_used: u64,
-    contract_address: ?input.Address,
-    logs: []Log,
-    logs_bloom: bloom.Bloom,
-    status: u8,
-    effective_gas_price: u128,
-    blob_gas_used: ?u64 = null,
-    blob_gas_price: ?u128 = null,
-};
+/// Re-export so callers can use transition.Log / transition.Receipt as before.
+pub const Log = input.Log;
+pub const Receipt = input.Receipt;
 
 pub const RejectedTx = struct {
     index: usize,
@@ -61,7 +35,7 @@ pub const TransitionResult = struct {
     receipts: []Receipt,
     rejected: []RejectedTx,
     cumulative_gas: u64,
-    block_bloom: bloom.Bloom,
+    block_bloom: input.Bloom,
     // Derived after execution
     current_base_fee: ?u64,
     excess_blob_gas: ?u64,
@@ -143,6 +117,45 @@ fn rlpAccessList(alloc: std.mem.Allocator, al: []const input.AccessListEntry) ![
     return rlp.encodeList(alloc, outer_items.items);
 }
 
+/// Encode blob versioned hashes to RLP list of 32-byte items (EIP-4844).
+fn rlpBlobVersionedHashes(alloc: std.mem.Allocator, hashes: []const input.Hash) ![]u8 {
+    var items = std.ArrayListUnmanaged([]const u8){};
+    defer items.deinit(alloc);
+    for (hashes) |h| try items.append(alloc, try rlp.encodeBytes(alloc, &h));
+    return rlp.encodeList(alloc, items.items);
+}
+
+/// Encode EIP-7702 authorization list to RLP (full wire form: [chain_id, addr, nonce, yParity, r, s]).
+/// Used in both the transaction signing hash and the transaction hash.
+fn rlpAuthorizationList(alloc: std.mem.Allocator, auth_list: []const input.AuthorizationItem) ![]u8 {
+    var outer = std.ArrayListUnmanaged([]const u8){};
+    defer outer.deinit(alloc);
+    for (auth_list) |item| {
+        const items = [_][]const u8{
+            try rlp.encodeU256(alloc, item.chain_id),
+            try rlp.encodeBytes(alloc, &item.address),
+            try rlp.encodeU64(alloc, item.nonce),
+            try rlp.encodeU256(alloc, item.y_parity),
+            try rlp.encodeU256(alloc, item.r),
+            try rlp.encodeU256(alloc, item.s),
+        };
+        try outer.append(alloc, try rlp.encodeList(alloc, &items));
+    }
+    return rlp.encodeList(alloc, outer.items);
+}
+
+/// Compute the signing hash for a single EIP-7702 authorization item.
+/// hash = keccak256(0x05 || rlp([chain_id, address, nonce]))
+fn authorizationSigningHash(alloc: std.mem.Allocator, item: *const input.AuthorizationItem) ![32]u8 {
+    const fields = [_][]const u8{
+        try rlp.encodeU256(alloc, item.chain_id),
+        try rlp.encodeBytes(alloc, &item.address),
+        try rlp.encodeU64(alloc, item.nonce),
+    };
+    const payload = try rlp.concat(alloc, &.{ &.{0x05}, try rlp.encodeList(alloc, &fields) });
+    return rlp.keccak256(payload);
+}
+
 /// Encode tx.to as RLP (empty bytes for CREATE, 20-byte address for CALL).
 fn rlpTo(alloc: std.mem.Allocator, to: ?input.Address) ![]u8 {
     if (to) |addr| return rlp.encodeBytes(alloc, &addr);
@@ -156,7 +169,8 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
 
     const payload = switch (tx.type) {
         0 => blk: {
-            if (tx.protected and chain_id > 0) {
+            const tx_chain_id = tx.chain_id orelse chain_id;
+            if (tx.protected and tx_chain_id > 0) {
                 // EIP-155: include chainId, 0, 0
                 const items = [_][]const u8{
                     try rlp.encodeU64(alloc, tx.nonce orelse 0),
@@ -165,7 +179,7 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                     to_enc,
                     try rlp.encodeU256(alloc, tx.value),
                     try rlp.encodeBytes(alloc, tx.data),
-                    try rlp.encodeU64(alloc, chain_id),
+                    try rlp.encodeU64(alloc, tx_chain_id),
                     try rlp.encodeBytes(alloc, &.{}), // 0
                     try rlp.encodeBytes(alloc, &.{}), // 0
                 };
@@ -208,6 +222,39 @@ fn signingHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64
                 al_enc,
             };
             break :blk try rlp.concat(alloc, &.{ &.{0x02}, try rlp.encodeList(alloc, &items) });
+        },
+        3 => blk: {
+            const bvh_enc = try rlpBlobVersionedHashes(alloc, tx.blob_versioned_hashes);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                try rlp.encodeU128(alloc, tx.max_fee_per_blob_gas orelse 0),
+                bvh_enc,
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x03}, try rlp.encodeList(alloc, &items) });
+        },
+        4 => blk: {
+            const auth_enc = try rlpAuthorizationList(alloc, tx.authorization_list);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                auth_enc,
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x04}, try rlp.encodeList(alloc, &items) });
         },
         else => return error.UnsupportedTxType,
     };
@@ -273,6 +320,45 @@ fn txHash(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u64) ![3
             };
             break :blk try rlp.concat(alloc, &.{ &.{0x02}, try rlp.encodeList(alloc, &items) });
         },
+        3 => blk: {
+            const bvh_enc = try rlpBlobVersionedHashes(alloc, tx.blob_versioned_hashes);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                try rlp.encodeU128(alloc, tx.max_fee_per_blob_gas orelse 0),
+                bvh_enc,
+                try rlp.encodeU256(alloc, v), // yParity
+                try rlp.encodeU256(alloc, r),
+                try rlp.encodeU256(alloc, s),
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x03}, try rlp.encodeList(alloc, &items) });
+        },
+        4 => blk: {
+            const auth_enc = try rlpAuthorizationList(alloc, tx.authorization_list);
+            const items = [_][]const u8{
+                try rlp.encodeU64(alloc, tx.chain_id orelse chain_id),
+                try rlp.encodeU64(alloc, tx.nonce orelse 0),
+                try rlp.encodeU128(alloc, tx.max_priority_fee_per_gas orelse 0),
+                try rlp.encodeU128(alloc, tx.max_fee_per_gas orelse 0),
+                try rlp.encodeU64(alloc, tx.gas),
+                to_enc,
+                try rlp.encodeU256(alloc, tx.value),
+                try rlp.encodeBytes(alloc, tx.data),
+                al_enc,
+                auth_enc,
+                try rlp.encodeU256(alloc, v), // yParity
+                try rlp.encodeU256(alloc, r),
+                try rlp.encodeU256(alloc, s),
+            };
+            break :blk try rlp.concat(alloc, &.{ &.{0x04}, try rlp.encodeList(alloc, &items) });
+        },
         else => return error.UnsupportedTxType,
     };
 
@@ -296,7 +382,9 @@ fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_id: u
         0 => blk: {
             // EIP-155: v = 2*chainId + 35 + recid  → recid = v - 2*chainId - 35
             // Legacy: v = 27/28 → recid = v - 27
-            const chain_v: u256 = 2 * @as(u256, chain_id) + 35;
+            // Use the tx's own chain_id if present (important for non-mainnet chains).
+            const cid: u64 = tx.chain_id orelse chain_id;
+            const chain_v: u256 = 2 * @as(u256, cid) + 35;
             if (v_val >= chain_v and v_val <= chain_v + 1) {
                 break :blk @intCast(v_val - chain_v);
             } else if (v_val == 27 or v_val == 28) {
@@ -421,7 +509,7 @@ fn buildDb(
 
 // ─── Context setup ────────────────────────────────────────────────────────────
 
-fn buildBlockEnv(env: input.Env) context_mod.BlockEnv {
+fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
     var block = context_mod.BlockEnv.default();
     block.number = @as(primitives.U256, env.number);
     block.timestamp = @as(primitives.U256, env.timestamp);
@@ -432,7 +520,12 @@ fn buildBlockEnv(env: input.Env) context_mod.BlockEnv {
     block.prevrandao = env.random;
     // Blob gas — compute blob_gasprice via fake_exponential, not hardcode 1
     if (env.excess_blob_gas) |ebg| {
-        block.setBlobExcessGasAndPrice(ebg, primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE);
+        // EIP-7691 (Prague+): use updated fraction 5007716; Cancun and below use 3338477
+        const fraction = if (primitives.isEnabledIn(spec, .prague))
+            primitives.BLOB_BASE_FEE_UPDATE_FRACTION_OSAKA
+        else
+            primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE;
+        block.setBlobExcessGasAndPrice(ebg, fraction);
     }
     return block;
 }
@@ -453,18 +546,60 @@ fn effectiveGasPrice(tx: *const input.TxInput, base_fee: u64) u128 {
 
 pub fn transition(
     arena: std.mem.Allocator,
-    pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     env: input.Env,
     txs: []input.TxInput,
     spec: primitives.SpecId,
     chain_id: u64,
     reward: i64, // mining reward in wei; -1 = disabled
 ) !TransitionResult {
+    // ── EIP-4788: apply beacon block root system call pre-state (Cancun+) ────
+    // Mutate a mutable copy of pre_alloc to store (timestamp, root) in the
+    // beacon roots contract storage before building the DB.
+    var pre_alloc = pre_alloc_in;
+    if (primitives.isEnabledIn(spec, .cancun)) {
+        if (env.parent_beacon_block_root) |root| {
+            const BEACON_ROOTS_ADDRESS: input.Address = .{
+                0x00, 0x0F, 0x3d, 0xf6, 0xD7, 0x32, 0x80, 0x7E, 0xf1, 0x31,
+                0x9f, 0xB7, 0xB8, 0xBb, 0x85, 0x22, 0xd0, 0xBe, 0xac, 0x02,
+            };
+            const HISTORY_BUFFER_LENGTH: u256 = 8191;
+            const ts: u256 = env.timestamp;
+            const ts_idx = ts % HISTORY_BUFFER_LENGTH;
+            const root_idx = ts_idx + HISTORY_BUFFER_LENGTH;
+            var root_val: u256 = 0;
+            for (root) |b| root_val = (root_val << 8) | b;
+
+            const entry = try pre_alloc.getOrPut(arena, BEACON_ROOTS_ADDRESS);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            try entry.value_ptr.*.storage.put(arena, ts_idx,   ts);
+            try entry.value_ptr.*.storage.put(arena, root_idx, root_val);
+        }
+    }
+
+    // ── EIP-2935: apply block hash history contract system call (Prague+) ──────
+    // At the start of each block, store parent_hash at slot (block_number - 1) % 8192.
+    if (primitives.isEnabledIn(spec, .prague)) {
+        if (env.parent_hash) |parent_hash| {
+            const HISTORY_STORAGE_ADDRESS: input.Address = .{
+                0x00, 0x00, 0xf9, 0x08, 0x27, 0xf1, 0xc5, 0x3a, 0x10, 0xcb,
+                0x7a, 0x02, 0x33, 0x5b, 0x17, 0x53, 0x20, 0x00, 0x29, 0x35,
+            };
+            const HISTORY_BUFFER_LENGTH: u256 = 8192;
+            const slot: u256 = if (env.number > 0) (env.number - 1) % HISTORY_BUFFER_LENGTH else 0;
+            var hash_val: u256 = 0;
+            for (parent_hash) |b| hash_val = (hash_val << 8) | b;
+            const entry = try pre_alloc.getOrPut(arena, HISTORY_STORAGE_ADDRESS);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            try entry.value_ptr.*.storage.put(arena, slot, hash_val);
+        }
+    }
+
     // ── Build DB and EVM context ──────────────────────────────────────────────
     const db = try buildDb(arena, pre_alloc, env.block_hashes);
     // Context takes DB by value (moves into journal)
     var ctx = context_mod.Context.new(db, spec);
-    ctx.block = buildBlockEnv(env);
+    ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
 
@@ -573,16 +708,31 @@ pub fn transition(
         if (tx.type == 4 and tx.authorization_list.len > 0) {
             var auth_list = std.ArrayList(context_mod.Either){};
             for (tx.authorization_list) |ai| {
+                // Recover the authorization signer if not already set.
+                const authority: context_mod.RecoveredAuthority = blk: {
+                    if (ai.signer) |s| break :blk context_mod.RecoveredAuthority{ .Valid = s };
+                    // Validate signature fields per EIP-7702
+                    if (ai.y_parity > 1) break :blk context_mod.RecoveredAuthority.Invalid;
+                    // s must be in lower half of secp256k1 curve order
+                    const SECP256K1N_OVER_2: u256 = 0x7fffffffffffffffffffffffffffffff5d576e7357a4501ddfe92f46681b20a0;
+                    if (ai.s > SECP256K1N_OVER_2) break :blk context_mod.RecoveredAuthority.Invalid;
+                    // keccak256(0x05 || rlp([chain_id, address, nonce]))
+                    const auth_hash = authorizationSigningHash(arena, &ai) catch break :blk context_mod.RecoveredAuthority.Invalid;
+                    const recid: u8 = if (ai.y_parity == 0) 0 else 1;
+                    var auth_sig: [64]u8 = undefined;
+                    std.mem.writeInt(u256, auth_sig[0..32], ai.r, .big);
+                    std.mem.writeInt(u256, auth_sig[32..64], ai.s, .big);
+                    const auth_ctx = secp_wrapper.getContext() orelse break :blk context_mod.RecoveredAuthority.Invalid;
+                    const signer = auth_ctx.ecrecover(auth_hash, auth_sig, recid) orelse break :blk context_mod.RecoveredAuthority.Invalid;
+                    break :blk context_mod.RecoveredAuthority{ .Valid = signer };
+                };
                 const recovered = context_mod.RecoveredAuthorization.newUnchecked(
                     context_mod.Authorization{
                         .chain_id = ai.chain_id,
                         .address = ai.address,
                         .nonce = ai.nonce,
                     },
-                    if (ai.signer) |s|
-                        context_mod.RecoveredAuthority{ .Valid = s }
-                    else
-                        context_mod.RecoveredAuthority.Invalid,
+                    authority,
                 );
                 auth_list.append(std.heap.c_allocator, context_mod.Either{ .Right = recovered }) catch {};
             }
@@ -804,12 +954,23 @@ pub fn transition(
             .effective_gas_price = egp,
             .blob_gas_used = if (tx.type == 3) tx.blob_versioned_hashes.len * 131_072 else null,
             .blob_gas_price = if (tx.type == 3)
-                if (ctx.block.blob_excess_gas_and_price) |bep| @as(u128, bep.blob_gasprice) else null
+                if (ctx.block.blob_excess_gas_and_price) |bep| bep.blob_gasprice else null
             else null,
         });
 
         // Free execution result logs (exec_result.logs is an ArrayList we own)
         exec_result.logs.deinit(std.heap.c_allocator);
+
+        // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
+        // Each receipt must encode the state root *after that specific transaction*
+        // (before subsequent txs and before the mining reward).
+        if (!primitives.isEnabledIn(spec, .byzantium)) {
+            const per_tx_alloc = extractPostState(arena, pre_alloc, &ctx) catch null;
+            if (per_tx_alloc) |pa| {
+                const sr = output_mod.computeStateRoot(arena, pa, &.{}) catch null;
+                receipts.items[receipts.items.len - 1].state_root = sr;
+            }
+        }
 
         // Track accepted transactions (for txRoot — rejected txs are excluded)
         try accepted_txs.append(arena, tx.*);
@@ -838,6 +999,83 @@ pub fn transition(
     }
     if (env.withdrawals.len > 0) {
         ctx.journaled_state.commitTx();
+    }
+
+    // ── EIP-7002 / EIP-7251: post-execution system contract calls (Prague+) ────
+    // After all user txs and withdrawals, call the withdrawal-requests and
+    // consolidation-requests system contracts as the privileged SYSTEM_ADDRESS.
+    // These calls run outside normal gas accounting (no fee deduction, no nonce
+    // increment).  State changes are committed on success and discarded on revert.
+    if (primitives.isEnabledIn(spec, .prague)) {
+        const SYSTEM_ADDRESS: input.Address = .{
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xfe,
+        };
+        // The spec gives the system contract exactly 30M execution gas.
+        // zevm deducts the 21,000 intrinsic base before the frame starts,
+        // so the tx gas_limit must be 30M + 21,000.
+        const SYSTEM_CALL_GAS: u64 = 30_000_000 + 21_000;
+        // EIP-7002 withdrawal requests + EIP-7251 consolidation requests
+        const system_contracts = [_]input.Address{
+            .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5,
+               0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6,
+               0x4c, 0x00, 0x70, 0x02 },
+            .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86,
+               0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5,
+               0x90, 0x00, 0x72, 0x51 },
+        };
+
+        // Bypass normal tx validation for system calls.
+        const saved_nonce   = ctx.cfg.disable_nonce_check;
+        const saved_bal     = ctx.cfg.disable_balance_check;
+        const saved_fee     = ctx.cfg.disable_fee_charge;
+        const saved_basefee = ctx.cfg.disable_base_fee;
+        ctx.cfg.disable_nonce_check   = true;
+        ctx.cfg.disable_balance_check = true;
+        ctx.cfg.disable_fee_charge    = true;
+        ctx.cfg.disable_base_fee      = true;
+
+        for (system_contracts) |sc_addr| {
+            // Per EIP-7002/7251: skip if the contract is not deployed (no code).
+            // Avoids touching the journal for non-existent contracts, which would
+            // corrupt the state root in tests that don't deploy the system contracts.
+            const sc_pre = pre_alloc.get(sc_addr);
+            if (sc_pre == null or sc_pre.?.code.len == 0) continue;
+
+            ctx.tx.caller             = SYSTEM_ADDRESS;
+            ctx.tx.kind               = context_mod.TxKind{ .Call = sc_addr };
+            ctx.tx.gas_limit          = SYSTEM_CALL_GAS;
+            ctx.tx.gas_price          = 0;
+            ctx.tx.gas_priority_fee   = null;
+            ctx.tx.value              = 0;
+            ctx.tx.nonce              = 0;
+            ctx.tx.tx_type            = 0;
+            ctx.tx.data               = null;
+            ctx.tx.access_list        = context_mod.AccessList{ .items = null };
+            ctx.tx.blob_hashes        = null;
+            ctx.tx.authorization_list = null;
+            ctx.tx.chain_id           = chain_id;
+
+            var sc_frames = handler_mod.FrameStack.new();
+            var sc_evm    = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &sc_frames);
+            var sc_result = handler_mod.ExecuteEvm.execute(&sc_evm) catch {
+                ctx.journaled_state.discardTx();
+                continue;
+            };
+            sc_result.logs.deinit(std.heap.c_allocator);
+
+            // System calls must not increment the caller's nonce.
+            // zevm always bumps nonce unconditionally, so patch it back.
+            if (ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS)) |sa| {
+                if (sa.info.nonce > 0) sa.info.nonce -= 1;
+            }
+        }
+
+        ctx.cfg.disable_nonce_check   = saved_nonce;
+        ctx.cfg.disable_balance_check = saved_bal;
+        ctx.cfg.disable_fee_charge    = saved_fee;
+        ctx.cfg.disable_base_fee      = saved_basefee;
     }
 
     // ── Extract post-state ────────────────────────────────────────────────────
@@ -871,11 +1109,17 @@ fn extractPostState(
     var pre_it = pre_alloc.iterator();
     while (pre_it.next()) |pre_entry| {
         var acct = input.AllocAccount{
-            .balance = pre_entry.value_ptr.*.balance,
-            .nonce = pre_entry.value_ptr.*.nonce,
-            .code = pre_entry.value_ptr.*.code,
+            .balance          = pre_entry.value_ptr.*.balance,
+            .nonce            = pre_entry.value_ptr.*.nonce,
+            .code             = pre_entry.value_ptr.*.code,
+            .pre_storage_root = pre_entry.value_ptr.*.pre_storage_root,
         };
-        // Clone storage
+        // Clone storage (included for both normal and delta modes:
+        //   - Normal mode (pre_storage_root==null): full pre-state for scratch-build.
+        //   - Delta mode (pre_storage_root set): includes witness-proven slots AND any
+        //     direct pre_alloc mutations (e.g. EIP-2935/4788 system calls). All entries
+        //     are applied as updates/insertions to pre_storage_root; unchanged ones are
+        //     idempotent. Zero values written later signal deletions.)
         var sit = pre_entry.value_ptr.*.storage.iterator();
         while (sit.next()) |slot| {
             try acct.storage.put(arena, slot.key_ptr.*, slot.value_ptr.*);
@@ -898,8 +1142,15 @@ fn extractPostState(
             continue;
         }
 
-        // Get or create post-alloc entry (base from pre-state if exists)
+        // Get or create post-alloc entry (base from pre-state if exists).
+        // Newly created accounts (created=true) and accounts whose storage was wiped by a
+        // prior SELFDESTRUCT (storage_wiped=true) must NOT inherit pre-state storage.
+        const fresh_storage = account.status.created or account.status.storage_wiped;
         var acct = post.get(addr) orelse input.AllocAccount{};
+        if (fresh_storage) {
+            acct.storage = .{};
+            acct.pre_storage_root = null; // rebuild from scratch for freshly-created/wiped storage
+        }
 
         // Update basic fields
         acct.balance = account.info.balance;
@@ -947,13 +1198,19 @@ fn extractPostState(
             acct.code = &.{};
         }
 
-        // Update storage: merge pre-state slots with journal modifications
+        // Update storage: merge pre-state slots with journal modifications.
+        // In delta mode (pre_storage_root != null) keep zero values as deletion markers
+        // so computeStorageRoot() can apply the MPT delete operation.
         var stor_it = account.storage.iterator();
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
             const present = slot.value_ptr.*.present_value;
             if (present == 0) {
-                _ = acct.storage.remove(key);
+                if (acct.pre_storage_root != null) {
+                    try acct.storage.put(arena, key, 0); // deletion marker for MPT update
+                } else {
+                    _ = acct.storage.remove(key);
+                }
             } else {
                 try acct.storage.put(arena, key, present);
             }

@@ -26,7 +26,7 @@
 const std = @import("std");
 
 const input_mod = @import("input.zig");
-const transition_mod = @import("transition.zig");
+const transition_mod = @import("executor_transition");
 const output_mod = @import("output.zig");
 
 pub fn main() !void {

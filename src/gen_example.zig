@@ -128,30 +128,34 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
     return encList(buf, 0, payload[0..pl]);
 }
 
-/// Build a minimal but structurally valid post-Shanghai Ethereum block whose
+/// Build a minimal but structurally valid Osaka Ethereum block whose
 /// header stateRoot is set to `state_root`.  All other fields use zero or
 /// well-known empty values.  Returns the number of bytes written to `buf`.
 ///
 /// Block = RLP([header, transactions, uncles, withdrawals])
 ///
-/// Header fields used:
-///   0  parentHash:       [0; 32]
-///   1  sha3Uncles:       SHA3_EMPTY_LIST
-///   2  coinbase:         [0; 20]
-///   3  stateRoot:        state_root          ← proof anchor
-///   4  transactionsRoot: EMPTY_TRIE_HASH
-///   5  receiptsRoot:     EMPTY_TRIE_HASH
-///   6  logsBloom:        [0; 256]
-///   7  difficulty:       0 (PoS)
-///   8  number:           1
-///   9  gasLimit:         30_000_000
-///  10  gasUsed:          0
-///  11  timestamp:        1
-///  12  extraData:        []
-///  13  mixHash:          [0; 32]  (prevRandao)
-///  14  nonce:            [0; 8]   (PoS fixed)
-///  15  baseFeePerGas:    7
-///  16  withdrawalsRoot:  EMPTY_TRIE_HASH
+/// Header fields (Osaka — all 21):
+///   0  parentHash:            [0; 32]
+///   1  sha3Uncles:            SHA3_EMPTY_LIST
+///   2  coinbase:              [0; 20]
+///   3  stateRoot:             state_root          ← proof anchor
+///   4  transactionsRoot:      EMPTY_TRIE_HASH
+///   5  receiptsRoot:          EMPTY_TRIE_HASH
+///   6  logsBloom:             [0; 256]
+///   7  difficulty:            0 (PoS)
+///   8  number:                1
+///   9  gasLimit:              30_000_000
+///  10  gasUsed:               0
+///  11  timestamp:             1
+///  12  extraData:             []
+///  13  mixHash (prevRandao):  [0; 32]
+///  14  nonce:                 [0; 8]  (PoS fixed)
+///  15  baseFeePerGas:         7
+///  16  withdrawalsRoot:       EMPTY_TRIE_HASH
+///  17  blobGasUsed:           0       (EIP-4844)
+///  18  excessBlobGas:         0       (EIP-4844)
+///  19  parentBeaconBlockRoot: [0; 32] (EIP-4788)
+///  20  requestsHash:          [0; 32] (EIP-7685)
 fn buildBlockRlp(buf: []u8, state_root: primitives.Hash) usize {
     const zero32:  [32]u8  = @splat(0x00);
     const zero20:  [20]u8  = @splat(0x00);
@@ -159,19 +163,19 @@ fn buildBlockRlp(buf: []u8, state_root: primitives.Hash) usize {
     const zero256: [256]u8 = @splat(0x00);
 
     // ── Build header payload ─────────────────────────────────────────────────
-    var hdr_payload: [700]u8 = undefined;
+    var hdr_payload: [900]u8 = undefined;
     var hp: usize = 0;
 
-    hp = encBytes(&hdr_payload, hp, &zero32);          // 0: parentHash
-    hp = encBytes(&hdr_payload, hp, &SHA3_EMPTY_LIST); // 1: sha3Uncles
-    hp = encBytes(&hdr_payload, hp, &zero20);          // 2: coinbase
-    hp = encBytes(&hdr_payload, hp, &state_root);      // 3: stateRoot
-    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 4: transactionsRoot
-    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 5: receiptsRoot
-    hp = encBytes(&hdr_payload, hp, &zero256);         // 6: logsBloom (256 bytes)
-    hdr_payload[hp] = 0x80; hp += 1;                  // 7: difficulty = 0
-    hp = encUint(&hdr_payload, hp, 1);                 // 8: number = 1
-    hp = encUint(&hdr_payload, hp, 30_000_000);        // 9: gasLimit
+    hp = encBytes(&hdr_payload, hp, &zero32);          // 0:  parentHash
+    hp = encBytes(&hdr_payload, hp, &SHA3_EMPTY_LIST); // 1:  sha3Uncles
+    hp = encBytes(&hdr_payload, hp, &zero20);          // 2:  coinbase
+    hp = encBytes(&hdr_payload, hp, &state_root);      // 3:  stateRoot
+    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 4:  transactionsRoot
+    hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 5:  receiptsRoot
+    hp = encBytes(&hdr_payload, hp, &zero256);         // 6:  logsBloom (256 bytes)
+    hdr_payload[hp] = 0x80; hp += 1;                  // 7:  difficulty = 0
+    hp = encUint(&hdr_payload, hp, 1);                 // 8:  number = 1
+    hp = encUint(&hdr_payload, hp, 30_000_000);        // 9:  gasLimit
     hdr_payload[hp] = 0x80; hp += 1;                  // 10: gasUsed = 0
     hp = encUint(&hdr_payload, hp, 1);                 // 11: timestamp = 1
     hdr_payload[hp] = 0x80; hp += 1;                  // 12: extraData = []
@@ -179,12 +183,16 @@ fn buildBlockRlp(buf: []u8, state_root: primitives.Hash) usize {
     hp = encBytes(&hdr_payload, hp, &zero8);           // 14: nonce = 0
     hp = encUint(&hdr_payload, hp, 7);                 // 15: baseFeePerGas = 7
     hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 16: withdrawalsRoot
+    hdr_payload[hp] = 0x80; hp += 1;                  // 17: blobGasUsed = 0
+    hdr_payload[hp] = 0x80; hp += 1;                  // 18: excessBlobGas = 0
+    hp = encBytes(&hdr_payload, hp, &zero32);          // 19: parentBeaconBlockRoot
+    hp = encBytes(&hdr_payload, hp, &zero32);          // 20: requestsHash
 
-    var hdr_buf: [750]u8 = undefined;
+    var hdr_buf: [1000]u8 = undefined;
     const hdr_len = encList(&hdr_buf, 0, hdr_payload[0..hp]);
 
-    // ── Build block payload (header + 3 empty body lists) ───────────────────
-    var block_payload: [800]u8 = undefined;
+    // ── Build block payload (header + 4 empty body lists) ───────────────────
+    var block_payload: [1100]u8 = undefined;
     var bp: usize = 0;
 
     @memcpy(block_payload[bp..][0..hdr_len], hdr_buf[0..hdr_len]);
@@ -223,7 +231,7 @@ pub fn main() !void {
     try cwd.makePath("examples");
 
     // ── block.json — full RLP block ──────────────────────────────────────────
-    var block_rlp_buf: [900]u8 = undefined;
+    var block_rlp_buf: [1200]u8 = undefined;
     const block_rlp_len = buildBlockRlp(&block_rlp_buf, state_root);
     const block_rlp_bytes = block_rlp_buf[0..block_rlp_len];
 

@@ -25,4 +25,6 @@ pub const ProofOutput = struct {
     receipts_root: primitives.Hash,
     /// Per-transaction receipt data.
     receipts: []const ReceiptData,
+    /// Fork name used for execution (e.g. "Prague").
+    fork_name: []const u8,
 };
