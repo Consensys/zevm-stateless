@@ -16,8 +16,9 @@ const input = @import("executor_types");
 const bloom = @import("bloom.zig");
 const rlp = @import("executor_rlp_encode");
 const precompile_mod = @import("precompile");
-const secp_wrapper = precompile_mod.secp256k1_wrapper;
+const secp_wrapper = @import("secp256k1_wrapper");
 const output_mod = @import("executor_output");
+const alloc_mod = @import("executor_allocator");
 
 // ─── Output types (re-exported from executor_types) ───────────────────────────
 
@@ -457,11 +458,10 @@ fn createAddress(alloc: std.mem.Allocator, sender: input.Address, nonce: u64) !i
 // ─── Pre-state loader ─────────────────────────────────────────────────────────
 
 fn buildDb(
-    alloc: std.mem.Allocator,
     pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     block_hashes: []const input.BlockHashEntry,
 ) !database_mod.InMemoryDB {
-    var db = database_mod.InMemoryDB.init(std.heap.c_allocator);
+    var db = database_mod.InMemoryDB.init(alloc_mod.get());
 
     var it = pre_alloc.iterator();
     while (it.next()) |entry| {
@@ -503,7 +503,6 @@ fn buildDb(
         try db.insertBlockHash(bhe.number, bhe.hash);
     }
 
-    _ = alloc;
     return db;
 }
 
@@ -596,7 +595,7 @@ pub fn transition(
     }
 
     // ── Build DB and EVM context ──────────────────────────────────────────────
-    const db = try buildDb(arena, pre_alloc, env.block_hashes);
+    const db = try buildDb(pre_alloc, env.block_hashes);
     // Context takes DB by value (moves into journal)
     var ctx = context_mod.Context.new(db, spec);
     ctx.block = buildBlockEnv(env, spec);
@@ -690,12 +689,12 @@ pub fn transition(
         }
 
         // EIP-4844: pass blob hashes and max fee per blob gas to the EVM context
-        if (ctx.tx.blob_hashes) |*old_bh| old_bh.deinit(std.heap.c_allocator);
+        if (ctx.tx.blob_hashes) |*old_bh| old_bh.deinit(arena);
         if (tx.type == 3) {
             // Always create a blob_hashes list for type-3 txs (even if empty), so that
             // validateBlobTx sees an empty list and rejects it with EmptyBlobList.
             var blob_list = std.ArrayList(primitives.Hash){};
-            blob_list.appendSlice(std.heap.c_allocator, tx.blob_versioned_hashes) catch {};
+            blob_list.appendSlice(arena, tx.blob_versioned_hashes) catch {};
             ctx.tx.blob_hashes = blob_list;
             ctx.tx.max_fee_per_blob_gas = tx.max_fee_per_blob_gas orelse 0;
         } else {
@@ -704,7 +703,7 @@ pub fn transition(
         }
 
         // EIP-7702: populate authorization list for type 4 transactions
-        if (ctx.tx.authorization_list) |*old_al| old_al.deinit(std.heap.c_allocator);
+        if (ctx.tx.authorization_list) |*old_al| old_al.deinit(alloc_mod.get());
         if (tx.type == 4 and tx.authorization_list.len > 0) {
             var auth_list = std.ArrayList(context_mod.Either){};
             for (tx.authorization_list) |ai| {
@@ -734,7 +733,7 @@ pub fn transition(
                     },
                     authority,
                 );
-                auth_list.append(std.heap.c_allocator, context_mod.Either{ .Right = recovered }) catch {};
+                auth_list.append(alloc_mod.get(), context_mod.Either{ .Right = recovered }) catch {};
             }
             ctx.tx.authorization_list = auth_list;
         } else {
@@ -764,7 +763,7 @@ pub fn transition(
         ctx.tx.data = null;
         if (tx.data.len > 0) {
             var data_list = std.ArrayList(u8){};
-            data_list.appendSlice(std.heap.c_allocator, tx.data) catch {
+            data_list.appendSlice(alloc_mod.get(), tx.data) catch {
                 try rejected.append(arena, .{ .index = tx_idx, .err = "alloc error for tx data" });
                 continue;
             };
@@ -781,9 +780,9 @@ pub fn transition(
                 };
                 for (al_entry.storage_keys) |key| {
                     const sk = std.mem.readInt(u256, &key, .big);
-                    item.storage_keys.append(std.heap.c_allocator, sk) catch {};
+                    item.storage_keys.append(alloc_mod.get(), sk) catch {};
                 }
-                al_items.append(std.heap.c_allocator, item) catch {};
+                al_items.append(alloc_mod.get(), item) catch {};
             }
             ctx.tx.access_list = context_mod.AccessList{ .items = al_items };
         } else {
@@ -794,10 +793,10 @@ pub fn transition(
         if (tx.type == 4 and tx.authorization_list.len == 0) {
             ctx.journaled_state.discardTx();
             try rejected.append(arena, .{ .index = tx_idx, .err = "type 4 transaction with empty authorization list" });
-            if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+            if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
-            if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+            if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
             ctx.tx.blob_hashes = null;
             ctx.tx.authorization_list = null;
             continue;
@@ -812,12 +811,12 @@ pub fn transition(
                 ctx.journaled_state.discardTx();
                 const err_msg = std.fmt.allocPrint(arena, "load sender: {}", .{err}) catch "load error";
                 try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
-                if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+                if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
-                if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
                 ctx.tx.blob_hashes = null;
-                if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+                if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
                 continue;
             };
@@ -827,12 +826,12 @@ pub fn transition(
                 ctx.journaled_state.discardTx();
                 const err_msg = std.fmt.allocPrint(arena, "nonce mismatch: have {}, want {}", .{ sender_info.nonce, tx_nonce }) catch "nonce error";
                 try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
-                if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+                if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
-                if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
                 ctx.tx.blob_hashes = null;
-                if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+                if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
                 continue;
             }
@@ -849,12 +848,12 @@ pub fn transition(
                 ctx.journaled_state.discardTx();
                 const err_msg = std.fmt.allocPrint(arena, "insufficient funds: have {}, need {}", .{ sender_info.balance, max_cost }) catch "balance error";
                 try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
-                if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+                if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
-                if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
                 ctx.tx.blob_hashes = null;
-                if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+                if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
                 continue;
             }
@@ -868,12 +867,12 @@ pub fn transition(
             // Validation or system error: discard any partial state
             ctx.journaled_state.discardTx();
             // Clean up tx data
-            if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+            if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
-            if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+            if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
             ctx.tx.blob_hashes = null;
-            if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+            if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
             ctx.tx.authorization_list = null;
 
             const err_msg = std.fmt.allocPrint(arena, "{}", .{err}) catch "execution error";
@@ -882,12 +881,12 @@ pub fn transition(
         };
 
         // Clean up tx data (commitTx already happened inside execute)
-        if (ctx.tx.data) |*d| d.deinit(std.heap.c_allocator);
+        if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
         ctx.tx.data = null;
         ctx.tx.access_list.deinit();
-        if (ctx.tx.blob_hashes) |*bh| bh.deinit(std.heap.c_allocator);
+        if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
         ctx.tx.blob_hashes = null;
-        if (ctx.tx.authorization_list) |*al| al.deinit(std.heap.c_allocator);
+        if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
         ctx.tx.authorization_list = null;
 
         // 5. Build receipt
@@ -959,7 +958,7 @@ pub fn transition(
         });
 
         // Free execution result logs (exec_result.logs is an ArrayList we own)
-        exec_result.logs.deinit(std.heap.c_allocator);
+        exec_result.logs.deinit(alloc_mod.get());
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         // Each receipt must encode the state root *after that specific transaction*
@@ -1063,7 +1062,7 @@ pub fn transition(
                 ctx.journaled_state.discardTx();
                 continue;
             };
-            sc_result.logs.deinit(std.heap.c_allocator);
+            sc_result.logs.deinit(alloc_mod.get());
 
             // System calls must not increment the caller's nonce.
             // zevm always bumps nonce unconditionally, so patch it back.
