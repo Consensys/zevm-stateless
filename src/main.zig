@@ -151,8 +151,8 @@ fn run() !void {
     }
     std.debug.print(
         "  OK     root = 0x{x}\n" ++
-        "         {d} node(s) in pool, {d} key(s) verified\n\n",
-        .{ si.witness.state_root, si.witness.nodes.len, si.witness.keys.len },
+        "         {d} node(s), {d} code(s), {d} key(s), {d} header(s)\n\n",
+        .{ si.witness.state_root, si.witness.nodes.len, si.witness.codes.len, si.witness.keys.len, si.witness.headers.len },
     );
 
     // ── Phase 2: WitnessDatabase queries ──────────────────────────────────────
