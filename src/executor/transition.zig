@@ -957,8 +957,7 @@ pub fn transition(
             else null,
         });
 
-        // Free execution result logs (exec_result.logs is an ArrayList we own)
-        exec_result.logs.deinit(alloc_mod.get());
+        exec_result.deinit();
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         // Each receipt must encode the state root *after that specific transaction*
@@ -1062,7 +1061,7 @@ pub fn transition(
                 ctx.journaled_state.discardTx();
                 continue;
             };
-            sc_result.logs.deinit(alloc_mod.get());
+            sc_result.deinit();
 
             // System calls must not increment the caller's nonce.
             // zevm always bumps nonce unconditionally, so patch it back.
