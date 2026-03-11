@@ -9,6 +9,7 @@ const mpt         = @import("mpt");
 const db          = @import("db");
 const executor    = @import("executor");
 const alloc_mod   = @import("main_allocator");
+const zkvm_io     = @import("zkvm_io");
 
 pub fn main() void {
     run() catch |err| {
@@ -222,6 +223,22 @@ fn run() !void {
             std.debug.print("\nFAIL\n", .{});
             std.process.exit(1);
         }
+
+        // Emit a machine-readable JSON result line to stdout.
+        var out_buf: [512]u8 = undefined;
+        const out = try std.fmt.bufPrint(&out_buf,
+            "{{\"block\":{d},\"valid\":true," ++
+            "\"pre_state_root\":\"0x{x}\"," ++
+            "\"post_state_root\":\"0x{x}\"," ++
+            "\"receipts_root\":\"0x{x}\"}}\n",
+            .{
+                si.block.number,
+                proof_out.pre_state_root,
+                proof_out.post_state_root,
+                proof_out.receipts_root,
+            },
+        );
+        zkvm_io.write_output(out);
     }
 
     std.debug.print("\nOK\n", .{});

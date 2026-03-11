@@ -12,6 +12,7 @@ const std        = @import("std");
 const input_mod  = @import("input");
 const rlp_decode = @import("rlp_decode");
 const json_mod   = @import("json.zig");
+const zkvm_io    = @import("zkvm_io");
 
 /// Deserialize a zevm-zisk binary StatelessInput from stdin.
 ///
@@ -22,16 +23,7 @@ const json_mod   = @import("json.zig");
 ///   [u64: keys_count]    [u64 len + key bytes]  ...
 ///   [u64: headers_count] [u64 len + header RLP bytes] ...
 pub fn fromStdin(allocator: std.mem.Allocator) !input_mod.StatelessInput {
-    // Read all of stdin.
-    const stdin = std.fs.File{ .handle = std.posix.STDIN_FILENO };
-    var list = std.ArrayListUnmanaged(u8){};
-    var chunk: [4096]u8 = undefined;
-    while (true) {
-        const n = try stdin.read(&chunk);
-        if (n == 0) break;
-        try list.appendSlice(allocator, chunk[0..n]);
-    }
-    const data = list.items;
+    const data = try zkvm_io.read_input(allocator);
 
     var pos: usize = 0;
 

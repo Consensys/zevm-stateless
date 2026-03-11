@@ -138,6 +138,16 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // zkvm_io — injectable I/O module for the zevm_stateless binary.
+    // Default: reads from stdin, writes to stdout (suitable for native builds).
+    // Override for zkVM builds:
+    //   exe.root_module.addImport("zkvm_io", your_io_module)
+    const zkvm_io_mod = b.createModule(.{
+        .root_source_file = b.path("src/zkvm_io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+
     const exe = b.addExecutable(.{
         .name = "zevm_stateless",
         .root_module = b.createModule(.{
@@ -166,6 +176,7 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("executor",       executor_mod);
     exe.root_module.addImport("rlp_decode",     rlp_decode_mod);
     exe.root_module.addImport("main_allocator", main_allocator_mod);
+    exe.root_module.addImport("zkvm_io",        zkvm_io_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
     exe.addIncludePath(.{ .cwd_relative = crypto_include });
