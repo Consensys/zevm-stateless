@@ -216,7 +216,7 @@ fn processFile(
     defer arena.deinit();
     const alloc = arena.allocator();
 
-    const json_text = std.fs.cwd().readFileAlloc(alloc, full_path, 128 * 1024 * 1024) catch |err| {
+    const json_text = std.fs.cwd().readFileAlloc(alloc, full_path, 256 * 1024 * 1024) catch |err| {
         std.debug.print("error: cannot read '{s}': {}\n", .{ full_path, err });
         return true; // skip, don't stop
     };
