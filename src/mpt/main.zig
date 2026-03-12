@@ -651,6 +651,252 @@ pub fn updateStorageChained(
         keccak256(new_root_rlp);
 }
 
+// ─── Indexed variants of verifyWitness and chained update functions ────────────
+//
+// These accept a pre-built NodeIndex (hash→node map) produced by buildNodeIndex().
+// All pool lookups become O(1) hashmap lookups instead of O(N·keccak) linear scans.
+// The `extra` accumulator still uses a linear scan but it starts empty and grows
+// slowly (≤ D entries per account, where D is trie depth ≈ 8), so it stays fast.
+
+/// Like verifyWitness but uses a pre-built NodeIndex for O(1) node lookups.
+pub fn verifyWitnessIndexed(witness: input.StateWitness, index: *const NodeIndex) MptError!primitives.Hash {
+    var current_addr: ?primitives.Address = null;
+
+    for (witness.keys) |key| {
+        if (key.len == 20) {
+            var addr: primitives.Address = undefined;
+            @memcpy(&addr, key[0..20]);
+            current_addr = addr;
+            _ = try verifyAccountIndexed(witness.state_root, addr, index);
+
+        } else if (key.len == 52) {
+            var addr: primitives.Address = undefined;
+            @memcpy(&addr, key[0..20]);
+            current_addr = addr;
+            var raw_slot: primitives.Hash = undefined;
+            @memcpy(&raw_slot, key[20..52]);
+
+            const account_state = try verifyAccountIndexed(witness.state_root, addr, index);
+            const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
+            _ = try verifyStorageIndexed(storage_root, raw_slot, index);
+
+        } else if (key.len == 32) {
+            if (current_addr) |addr| {
+                var raw_slot: primitives.Hash = undefined;
+                @memcpy(&raw_slot, key[0..32]);
+
+                const account_state = try verifyAccountIndexed(witness.state_root, addr, index);
+                const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
+                _ = try verifyStorageIndexed(storage_root, raw_slot, index);
+            }
+        }
+    }
+    return witness.state_root;
+}
+
+/// Like updateAccountChained but uses a mutable NodeIndex for O(1) lookups.
+/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
+pub fn updateAccountChainedIndexed(
+    alloc: std.mem.Allocator,
+    root: *[32]u8,
+    addr_key: [32]u8,
+    account_rlp: ?[]const u8,
+    index: *NodeIndex,
+) (MptError || error{OutOfMemory})!void {
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&addr_key, &key_nibs);
+
+    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
+        if (account_rlp) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            const h = keccak256(leaf_rlp);
+            try index.put(h, leaf_rlp);
+            root.* = h;
+        }
+        return;
+    }
+
+    const root_bytes = findNodeInIndex(index, root.*) orelse return error.InvalidProof;
+    const new_root_rlp = try updNodeExIndexed(alloc, root_bytes, &key_nibs, account_rlp, index);
+    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
+        EMPTY_TRIE_HASH
+    else blk: {
+        const h = keccak256(new_root_rlp);
+        try index.put(h, new_root_rlp);
+        break :blk h;
+    };
+}
+
+/// Like updateStorageChained but uses a mutable NodeIndex for O(1) lookups.
+/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
+pub fn updateStorageChainedIndexed(
+    alloc: std.mem.Allocator,
+    root: *[32]u8,
+    slot: [32]u8,
+    new_value: u256,
+    index: *NodeIndex,
+) (MptError || error{OutOfMemory})!void {
+    const key_hash = keccak256(&slot);
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&key_hash, &key_nibs);
+
+    const new_val_enc: ?[]const u8 = if (new_value == 0) null else blk: {
+        break :blk try updRlpU256(alloc, new_value);
+    };
+
+    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
+        if (new_val_enc) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            const h = keccak256(leaf_rlp);
+            try index.put(h, leaf_rlp);
+            root.* = h;
+        }
+        return;
+    }
+
+    const root_bytes = findNodeInIndex(index, root.*) orelse return error.InvalidProof;
+    const new_root_rlp = try updNodeExIndexed(alloc, root_bytes, &key_nibs, new_val_enc, index);
+    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
+        EMPTY_TRIE_HASH
+    else blk: {
+        const h = keccak256(new_root_rlp);
+        try index.put(h, new_root_rlp);
+        break :blk h;
+    };
+}
+
+/// Like updResolveRefEx but uses NodeIndex for O(1) lookups.
+/// New nodes created during updates are inserted into the same index, so a single lookup suffices.
+fn updResolveRefExIndexed(ref: node.NodeRef, index: *const NodeIndex) MptError![]const u8 {
+    return switch (ref) {
+        .empty       => &.{0x80},
+        .hash        => |h| findNodeInIndex(index, h) orelse return error.InvalidProof,
+        .inline_node => |b| b,
+    };
+}
+
+/// Like updNodeEx but uses a single mutable NodeIndex for O(1) pool lookups.
+/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
+fn updNodeExIndexed(
+    alloc: std.mem.Allocator,
+    node_rlp: []const u8,
+    remaining: []const u8,
+    new_val: ?[]const u8,
+    index: *NodeIndex,
+) (MptError || error{OutOfMemory})![]const u8 {
+    if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
+        if (new_val) |val| return updMakeLeaf(alloc, remaining, val);
+        return alloc.dupe(u8, &.{0x80});
+    }
+
+    const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
+        error.InvalidRlp  => return error.InvalidRlp,
+        error.InvalidNode => return error.InvalidNode,
+    };
+
+    switch (decoded) {
+        .branch => |b| {
+            if (remaining.len == 0) {
+                var enc: [16][]const u8 = undefined;
+                for (b.children, 0..) |child, i| enc[i] = try updRefEnc(alloc, child);
+                return updEncodeBranch(alloc, &enc, new_val orelse &.{});
+            }
+            const nib = remaining[0];
+            const child_rlp = try updResolveRefExIndexed(b.children[nib], index);
+            const new_child_rlp = try updNodeExIndexed(alloc, child_rlp, remaining[1..], new_val, index);
+            const new_child_enc = try updHashOrEmbedExIndexed(alloc, new_child_rlp, index);
+            var enc: [16][]const u8 = undefined;
+            for (b.children, 0..) |child, i| {
+                if (i == nib) enc[i] = new_child_enc
+                else enc[i] = try updRefEnc(alloc, child);
+            }
+            return updEncodeBranch(alloc, &enc, b.value);
+        },
+
+        .extension => |e| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+            if (hp.is_leaf) return error.InvalidNode;
+            const prefix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(prefix, remaining);
+
+            if (cp == prefix.len) {
+                const child_rlp = try updResolveRefExIndexed(e.child, index);
+                const new_child_rlp = try updNodeExIndexed(alloc, child_rlp, remaining[cp..], new_val, index);
+                if (new_child_rlp.len == 1 and new_child_rlp[0] == 0x80)
+                    return alloc.dupe(u8, &.{0x80});
+                const new_child_ref = try updHashOrEmbedExIndexed(alloc, new_child_rlp, index);
+                return updMakeExtension(alloc, prefix, new_child_ref);
+            }
+
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            const old_nib = prefix[cp];
+            if (cp + 1 < prefix.len) {
+                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1..], try updRefEnc(alloc, e.child));
+                children_enc[old_nib] = try updHashOrEmbedExIndexed(alloc, ext_rlp, index);
+            } else {
+                children_enc[old_nib] = try updRefEnc(alloc, e.child);
+            }
+            if (new_val) |val| {
+                if (cp < remaining.len) {
+                    const new_nib = remaining[cp];
+                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], val);
+                    children_enc[new_nib] = try updHashOrEmbedExIndexed(alloc, leaf_rlp, index);
+                } else {
+                    branch_val = val;
+                }
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbedExIndexed(alloc, branch_rlp, index);
+            return updMakeExtension(alloc, prefix[0..cp], branch_ref);
+        },
+
+        .leaf => |lf| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+            if (!hp.is_leaf) return error.InvalidNode;
+            const suffix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(suffix, remaining);
+
+            if (cp == suffix.len and cp == remaining.len) {
+                if (new_val) |val| return updMakeLeaf(alloc, suffix, val);
+                return alloc.dupe(u8, &.{0x80});
+            }
+
+            if (new_val == null) {
+                return updMakeLeaf(alloc, suffix, lf.value);
+            }
+
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            if (cp < suffix.len) {
+                const old_nib = suffix[cp];
+                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1..], lf.value);
+                children_enc[old_nib] = try updHashOrEmbedExIndexed(alloc, old_leaf_rlp, index);
+            } else {
+                branch_val = lf.value;
+            }
+            if (cp < remaining.len) {
+                const new_nib = remaining[cp];
+                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], new_val.?);
+                children_enc[new_nib] = try updHashOrEmbedExIndexed(alloc, new_leaf_rlp, index);
+            } else {
+                branch_val = new_val.?;
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbedExIndexed(alloc, branch_rlp, index);
+            return updMakeExtension(alloc, suffix[0..cp], branch_ref);
+        },
+    }
+}
+
 /// Recursively update a node and return its new RLP bytes.
 /// Returns `&.{0x80}` (empty node) when the subtree becomes empty.
 fn updNode(
@@ -945,6 +1191,14 @@ fn updHashOrEmbedEx(alloc: std.mem.Allocator, node_rlp: []const u8, extra: *std.
     if (node_rlp.len < 32) return node_rlp;
     try extra.append(alloc, node_rlp);
     const h = keccak256(node_rlp);
+    return updRlpBytes(alloc, &h);
+}
+
+/// Like updHashOrEmbedEx but inserts the new node directly into the shared NodeIndex.
+fn updHashOrEmbedExIndexed(alloc: std.mem.Allocator, node_rlp: []const u8, index: *NodeIndex) ![]const u8 {
+    if (node_rlp.len < 32) return node_rlp;
+    const h = keccak256(node_rlp);
+    try index.put(h, node_rlp);
     return updRlpBytes(alloc, &h);
 }
 

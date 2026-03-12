@@ -6,7 +6,6 @@ const rlp_decode  = @import("rlp_decode");
 const input       = @import("input");
 const primitives  = @import("primitives");
 const mpt         = @import("mpt");
-const db          = @import("db");
 const executor    = @import("executor");
 const alloc_mod   = @import("main_allocator");
 const zkvm_io     = @import("zkvm_io");
@@ -91,90 +90,110 @@ fn run() !void {
 
     std.debug.print("=== zevm-stateless: block #{d} ===\n\n", .{si.block.number});
 
-    // ── Phase 1: MPT proof verification ───────────────────────────────────────
-    std.debug.print("Phase 1  MPT proof verification\n", .{});
-    {
-        var phase1_ok = true;
-        var current_addr: ?primitives.Address = null;
-
-        for (si.witness.keys, 0..) |key, i| {
-            if (key.len == 20) {
-                var addr: primitives.Address = undefined;
-                @memcpy(&addr, key[0..20]);
-                current_addr = addr;
-
-                _ = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |e| {
-                    std.debug.print("  [{d:>4}] FAIL account 0x{x} → {}\n", .{ i, addr, e });
-                    phase1_ok = false;
-                };
-
-            } else if (key.len == 52) {
-                var addr: primitives.Address = undefined;
-                @memcpy(&addr, key[0..20]);
-                current_addr = addr;
-                var slot: primitives.Hash = undefined;
-                @memcpy(&slot, key[20..52]);
-
-                const acct = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |e| {
-                    std.debug.print("  [{d:>4}] FAIL account 0x{x} (storage) → {}\n", .{ i, addr, e });
-                    phase1_ok = false;
-                    continue;
-                };
-                if (acct) |a| {
-                    _ = mpt.verifyStorage(a.storage_root, slot, si.witness.nodes) catch |e| {
-                        std.debug.print("  [{d:>4}] FAIL storage 0x{x} slot=0x{x} → {}\n", .{ i, addr, slot, e });
-                        phase1_ok = false;
-                    };
-                }
-
-            } else if (key.len == 32) {
-                var slot: primitives.Hash = undefined;
-                @memcpy(&slot, key[0..32]);
-
-                if (current_addr) |addr| {
-                    const acct = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |e| {
-                        std.debug.print("  [{d:>4}] FAIL account 0x{x} (storage) → {}\n", .{ i, addr, e });
-                        phase1_ok = false;
-                        continue;
-                    };
-                    if (acct) |a| {
-                        _ = mpt.verifyStorage(a.storage_root, slot, si.witness.nodes) catch |e| {
-                            std.debug.print("  [{d:>4}] FAIL storage 0x{x} slot=0x{x} → {}\n", .{ i, addr, slot, e });
-                            phase1_ok = false;
-                        };
-                    }
-                }
-            }
-        }
-
-        if (!phase1_ok) std.process.exit(1);
-    }
     std.debug.print(
-        "  OK     root = 0x{x}\n" ++
+        "witness  root = 0x{x}\n" ++
         "         {d} node(s), {d} code(s), {d} key(s), {d} header(s)\n\n",
         .{ si.witness.state_root, si.witness.nodes.len, si.witness.codes.len, si.witness.keys.len, si.witness.headers.len },
     );
 
-    // ── Phase 2: WitnessDatabase queries ──────────────────────────────────────
-    std.debug.print("Phase 2  WitnessDatabase queries\n", .{});
+    // ── Witness processing ────────────────────────────────────────────────────
+    // Build the NodeIndex once; it is also mutated by executeBlock during
+    // state-root delta computation (new intermediate nodes are inserted).
+    var node_index = try mpt.buildNodeIndex(allocator, si.witness.nodes);
+    defer node_index.deinit();
 
-    var account_count: usize = 0;
+    // Verify proof paths and populate the pre-execution account map in one pass.
+    const pre_state_root = si.witness.state_root;
+    var pre_alloc: std.AutoHashMapUnmanaged([20]u8, executor.AllocAccount) = .{};
+    var current_addr: ?[20]u8 = null;
+
     for (si.witness.keys) |key| {
-        if (key.len != 20) continue;
-        account_count += 1;
+        if (key.len == 20) {
+            var addr: [20]u8 = undefined;
+            @memcpy(&addr, key[0..20]);
+            current_addr = addr;
 
-        var addr: primitives.Address = undefined;
-        @memcpy(&addr, key[0..20]);
+            const account_state = (try mpt.verifyAccountIndexed(
+                si.witness.state_root, addr, &node_index,
+            )) orelse continue;
 
-        _ = mpt.verifyAccount(si.witness.state_root, addr, si.witness.nodes) catch |err| {
-            std.debug.print("  0x{x}  error: {}\n", .{ addr, err });
-        };
+            const code: []const u8 = blk: {
+                if (std.mem.eql(u8, &account_state.code_hash, &primitives.KECCAK_EMPTY)) break :blk &.{};
+                for (si.witness.codes) |code_bytes| {
+                    if (std.mem.eql(u8, &mpt.keccak256(code_bytes), &account_state.code_hash)) break :blk code_bytes;
+                }
+                break :blk &.{};
+            };
+
+            const entry = try pre_alloc.getOrPut(allocator, addr);
+            if (!entry.found_existing) {
+                entry.value_ptr.* = .{
+                    .balance          = account_state.balance,
+                    .nonce            = account_state.nonce,
+                    .code             = code,
+                    .pre_storage_root = account_state.storage_root,
+                };
+            }
+
+        } else if (key.len == 52) {
+            var addr: [20]u8 = undefined;
+            @memcpy(&addr, key[0..20]);
+            current_addr = addr;
+            var raw_slot: [32]u8 = undefined;
+            @memcpy(&raw_slot, key[20..52]);
+
+            const acct_state = (try mpt.verifyAccountIndexed(
+                si.witness.state_root, addr, &node_index,
+            )) orelse continue;
+
+            const value = mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index) catch 0;
+            if (value != 0) {
+                const entry = try pre_alloc.getOrPut(allocator, addr);
+                if (!entry.found_existing) entry.value_ptr.* = .{};
+                try entry.value_ptr.*.storage.put(allocator, hashToU256(raw_slot), value);
+            }
+
+        } else if (key.len == 32) {
+            if (current_addr) |addr| {
+                var raw_slot: [32]u8 = undefined;
+                @memcpy(&raw_slot, key[0..32]);
+
+                const acct_state = (try mpt.verifyAccountIndexed(
+                    si.witness.state_root, addr, &node_index,
+                )) orelse continue;
+
+                const value = mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index) catch 0;
+                if (value != 0) {
+                    const entry = try pre_alloc.getOrPut(allocator, addr);
+                    if (!entry.found_existing) entry.value_ptr.* = .{};
+                    try entry.value_ptr.*.storage.put(allocator, hashToU256(raw_slot), value);
+                }
+            }
+        }
     }
 
-    std.debug.print("  {d} account(s) in witness\n\n", .{account_count});
+    // Decode block-hash table from witness headers.
+    var block_hashes = std.ArrayListUnmanaged(executor.BlockHashEntry){};
+    for (si.witness.headers) |hdr_rlp| {
+        const hash  = mpt.keccak256(hdr_rlp);
+        const outer = mpt.rlp.decodeItem(hdr_rlp) catch continue;
+        var rest = switch (outer.item) { .list => |p| p, .bytes => continue };
+        var skip: usize = 0;
+        while (skip < 8 and rest.len > 0) : (skip += 1) {
+            const fr = mpt.rlp.decodeItem(rest) catch break;
+            rest = rest[fr.consumed..];
+        }
+        if (rest.len == 0) continue;
+        const num_r     = mpt.rlp.decodeItem(rest) catch continue;
+        const num_bytes = switch (num_r.item) { .bytes => |b| b, .list => continue };
+        if (num_bytes.len > 8) continue;
+        var number: u64 = 0;
+        for (num_bytes) |b| number = (number << 8) | b;
+        try block_hashes.append(allocator, .{ .number = number, .hash = hash });
+    }
 
-    // ── Phase 3: Block execution ───────────────────────────────────────────────
-    std.debug.print("\nPhase 3  Block execution\n", .{});
+    // ── Block execution ───────────────────────────────────────────────────────
+    std.debug.print("Block execution\n", .{});
     {
         const block_env = executor.blockEnvFromHeader(si.block);
 
@@ -193,7 +212,17 @@ fn run() !void {
         std.debug.print("  transactions  = {d}\n", .{si.transactions.len});
         if (fork_name) |f| std.debug.print("  fork override = {s}\n", .{f});
 
-        const proof_out = executor.executeBlock(allocator, si, fork_name) catch |err| {
+        const proof_out = executor.executeBlock(
+            allocator,
+            pre_state_root,
+            pre_alloc,
+            &node_index,
+            si.block,
+            si.transactions,
+            si.withdrawals,
+            block_hashes.items,
+            fork_name,
+        ) catch |err| {
             std.debug.print("  FAIL → {}\n", .{err});
             std.process.exit(1);
         };
@@ -242,4 +271,10 @@ fn run() !void {
     }
 
     std.debug.print("\nOK\n", .{});
+}
+
+fn hashToU256(hash: [32]u8) u256 {
+    var result: u256 = 0;
+    for (hash) |b| result = (result << 8) | b;
+    return result;
 }
