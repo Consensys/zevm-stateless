@@ -90,6 +90,19 @@ pub fn decodeBlockHeader(allocator: std.mem.Allocator, payload: []const u8) !inp
     return hdr;
 }
 
+/// Compute the block hash from a full block RLP (header + txns + ommers + withdrawals).
+/// Block hash = keccak256 of the RLP-encoded header (just the header item).
+/// Returns a zero hash if the RLP is malformed.
+pub fn keccak256Header(block_rlp: []const u8) [32]u8 {
+    const outer = mpt.rlp.decodeItem(block_rlp) catch return @splat(0);
+    const block_payload = switch (outer.item) {
+        .list => |p| p,
+        .bytes => return @splat(0),
+    };
+    const hdr_r = mpt.rlp.decodeItem(block_payload) catch return @splat(0);
+    return mpt.keccak256(block_payload[0..hdr_r.consumed]);
+}
+
 /// Find the pre-execution state root for `block_number` by scanning `headers`
 /// (bare RLP-encoded block headers from the witness) for block number-1.
 /// Returns null if block_number is 0 or no matching header is found.

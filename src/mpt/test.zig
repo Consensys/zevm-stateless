@@ -238,9 +238,9 @@ test "verifyWitness — single account in pool" {
     const leaf_bytes = leaf_node[0..leaf_len];
     const state_root = mpt.keccak256(leaf_bytes);
 
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = state_root,
-        .nodes = &[_][]const u8{leaf_bytes},
+        .state = &[_][]const u8{leaf_bytes},
         .codes = &.{},
         .keys = &[_][]const u8{&address},
         .headers = &.{},

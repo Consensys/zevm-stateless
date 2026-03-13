@@ -464,7 +464,7 @@ pub fn verifyStorageIndexed(
 /// Keys with length 52 are address (20) + storage slot (32).
 /// Keys with length 32 are standalone storage slots that belong to the
 /// nearest preceding account address (20-byte key) in the array.
-pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
+pub fn verifyWitness(witness: input.ExecutionWitness) MptError!primitives.Hash {
     var current_addr: ?primitives.Address = null;
 
     for (witness.keys) |key| {
@@ -472,7 +472,7 @@ pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
             var addr: primitives.Address = undefined;
             @memcpy(&addr, key[0..20]);
             current_addr = addr;
-            _ = try verifyAccount(witness.state_root, addr, witness.nodes);
+            _ = try verifyAccount(witness.state_root, addr, witness.state);
         } else if (key.len == 52) {
             var addr: primitives.Address = undefined;
             @memcpy(&addr, key[0..20]);
@@ -481,18 +481,18 @@ pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
             @memcpy(&raw_slot, key[20..52]);
 
             // Must verify the account first to get its storage_root.
-            const account_state = try verifyAccount(witness.state_root, addr, witness.nodes);
+            const account_state = try verifyAccount(witness.state_root, addr, witness.state);
             const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
-            _ = try verifyStorage(storage_root, raw_slot, witness.nodes);
+            _ = try verifyStorage(storage_root, raw_slot, witness.state);
         } else if (key.len == 32) {
             // Standalone slot: context account is the nearest preceding address key.
             if (current_addr) |addr| {
                 var raw_slot: primitives.Hash = undefined;
                 @memcpy(&raw_slot, key[0..32]);
 
-                const account_state = try verifyAccount(witness.state_root, addr, witness.nodes);
+                const account_state = try verifyAccount(witness.state_root, addr, witness.state);
                 const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
-                _ = try verifyStorage(storage_root, raw_slot, witness.nodes);
+                _ = try verifyStorage(storage_root, raw_slot, witness.state);
             }
         }
     }

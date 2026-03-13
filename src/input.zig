@@ -1,10 +1,14 @@
 //! StatelessInput: everything needed to execute a block without full state.
 //!
+//! Types mirror the stateless guest spec (ethereum/execution-specs stateless_guest.py),
+//! using RLP serialization in place of SSZ.
+//!
 //! The witness format mirrors debug_executionWitness (EL JSON-RPC):
-//!   - nodes:   flat pool of RLP-encoded trie node preimages
+//!   - state:   flat pool of RLP-encoded trie node preimages (spec: ExecutionWitness.state)
 //!   - codes:   flat array of contract bytecodes
 //!   - keys:    20-byte account addresses or 52-byte address+storage_slot pairs
-//!   - headers: RLP-encoded block headers (for BLOCKHASH opcode)
+//!              (zevm extension for pre-alloc; not in the base spec)
+//!   - headers: RLP-encoded block headers (for pre-state root + BLOCKHASH opcode)
 //!
 //! Proof verification works by hash lookup in the pool: given the state_root,
 //! the verifier walks the trie by finding each node via keccak256(node) == expected_hash.
@@ -87,19 +91,25 @@ pub const BlockHeader = struct {
     requests_hash: ?primitives.Hash, // [20]
 };
 
-/// State witness in debug_executionWitness flat-pool format.
-pub const StateWitness = struct {
-    /// Pre-execution state root (from the parent block header — the trust anchor).
+/// Chain configuration needed for stateless validation.
+pub const ChainConfig = struct {
+    chain_id: u64 = 1,
+};
+
+/// Execution witness in debug_executionWitness flat-pool format.
+/// Mirrors ExecutionWitness from the stateless guest spec.
+pub const ExecutionWitness = struct {
+    /// Pre-execution state root (derived from witness.headers during deserialization).
     state_root: primitives.Hash,
 
-    /// Flat pool of RLP-encoded trie node preimages.
+    /// Flat pool of RLP-encoded trie node preimages (spec: ExecutionWitness.state).
     /// Nodes are referenced by keccak256(node_bytes) during proof traversal.
-    nodes: []const []const u8,
+    state: []const []const u8,
 
     /// Contract bytecodes. keccak256(codes[i]) == account.code_hash.
     codes: []const []const u8,
 
-    /// Accessed state keys for this block:
+    /// Accessed state keys for this block (zevm extension — not in base spec):
     ///   20 bytes = account address
     ///   52 bytes = account address (20) + storage slot (32)
     ///   32 bytes = standalone storage slot (context = nearest preceding address key)
@@ -109,6 +119,9 @@ pub const StateWitness = struct {
     headers: []const []const u8,
 };
 
+/// Backward-compatible alias. Prefer ExecutionWitness in new code.
+pub const StateWitness = ExecutionWitness;
+
 /// EIP-4895 withdrawal (Shanghai+).
 pub const Withdrawal = struct {
     index: u64,
@@ -117,14 +130,24 @@ pub const Withdrawal = struct {
     amount: u64, // gwei
 };
 
-/// Full input to the guest program.
+/// Full input to the stateless guest program.
+/// Mirrors StatelessInput from the stateless guest spec.
 pub const StatelessInput = struct {
     /// Decoded block header (all consensus fields).
     block: BlockHeader,
     /// Transactions in execution order (decoded from RLP or binary).
     transactions: []const Transaction,
-    /// State witness for Phase 1 (MPT verification) and Phase 2 (database).
-    witness: StateWitness,
+    /// Execution witness for MPT proof verification and stateless execution.
+    witness: ExecutionWitness,
     /// EIP-4895 withdrawals (Shanghai+). Empty slice for pre-Shanghai blocks.
     withdrawals: []const Withdrawal = &.{},
+    /// Block hash — keccak256 of the block header RLP. Populated during
+    /// deserialization; serves as the commitment to the input payload
+    /// (spec: new_payload_request_root).
+    block_hash: primitives.Hash = @splat(0),
+    /// Chain configuration (spec: ChainConfig). Defaults to mainnet.
+    chain_config: ChainConfig = .{},
+    /// Recovered transaction public keys, in transaction order (spec field).
+    /// Empty in builds that perform ecrecover during execution.
+    public_keys: []const []const u8 = &.{},
 };
