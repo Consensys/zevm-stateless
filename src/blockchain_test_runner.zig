@@ -28,20 +28,23 @@ pub fn main() !void {
     // ── Parse CLI flags ───────────────────────────────────────────────────────
 
     var fixtures_dir: []const u8 = "spec-tests/fixtures/blockchain_tests";
-    var fork_filter:  ?[]const u8 = null;
-    var single_file:  ?[]const u8 = null;
+    var fork_filter: ?[]const u8 = null;
+    var single_file: ?[]const u8 = null;
     var stop_on_fail: bool = false;
-    var quiet:        bool = false;
+    var quiet: bool = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--fixtures") and i + 1 < args.len) {
-            i += 1; fixtures_dir = args[i];
+            i += 1;
+            fixtures_dir = args[i];
         } else if (std.mem.eql(u8, arg, "--fork") and i + 1 < args.len) {
-            i += 1; fork_filter = args[i];
+            i += 1;
+            fork_filter = args[i];
         } else if (std.mem.eql(u8, arg, "--file") and i + 1 < args.len) {
-            i += 1; single_file = args[i];
+            i += 1;
+            single_file = args[i];
         } else if (std.mem.eql(u8, arg, "-x")) {
             stop_on_fail = true;
         } else if (std.mem.eql(u8, arg, "-q")) {
@@ -103,7 +106,7 @@ pub fn main() !void {
             defer argv.deinit(allocator);
             try argv.appendSlice(allocator, &.{ exe_path, "--file", full_path });
             if (fork_filter) |f| try argv.appendSlice(allocator, &.{ "--fork", f });
-            if (quiet)        try argv.append(allocator, "-q");
+            if (quiet) try argv.append(allocator, "-q");
             if (stop_on_fail) try argv.append(allocator, "-x");
 
             var child = std.process.Child.init(argv.items, allocator);
@@ -132,10 +135,10 @@ pub fn main() !void {
                             stats.skipped += std.fmt.parseInt(u64, kv["skipped=".len..], 10) catch 0;
                     }
                 } else if (!std.mem.startsWith(u8, line, "===") and
-                           !std.mem.startsWith(u8, line, "  Results:") and
-                           !std.mem.startsWith(u8, line, "  Failed:") and
-                           !std.mem.startsWith(u8, line, "  Skipped:") and
-                           line.len > 0)
+                    !std.mem.startsWith(u8, line, "  Results:") and
+                    !std.mem.startsWith(u8, line, "  Failed:") and
+                    !std.mem.startsWith(u8, line, "  Skipped:") and
+                    line.len > 0)
                 {
                     std.debug.print("{s}\n", .{line});
                 }
@@ -143,14 +146,20 @@ pub fn main() !void {
 
             const term = child.wait() catch std.process.Child.Term{ .Exited = 1 };
             switch (term) {
-                .Signal  => |sig| { if (!quiet) std.debug.print("CRASH(sig:{})  {s}\n", .{ sig, rel_path }); stats.skipped += 1; },
-                .Exited  => |code| {
+                .Signal => |sig| {
+                    if (!quiet) std.debug.print("CRASH(sig:{})  {s}\n", .{ sig, rel_path });
+                    stats.skipped += 1;
+                },
+                .Exited => |code| {
                     if (code > 1) {
                         if (!quiet) std.debug.print("CRASH(exit:{})  {s}\n", .{ code, rel_path });
                         stats.skipped += 1;
                     }
                 },
-                else     => { if (!quiet) std.debug.print("CRASH  {s}\n", .{rel_path}); stats.skipped += 1; },
+                else => {
+                    if (!quiet) std.debug.print("CRASH  {s}\n", .{rel_path});
+                    stats.skipped += 1;
+                },
             }
 
             if (stop_on_fail and stats.failed > 0) break;
@@ -164,13 +173,13 @@ pub fn main() !void {
 }
 
 fn processFile(
-    allocator:    std.mem.Allocator,
-    full_path:    []const u8,
-    rel_path:     []const u8,
-    fork_filter:  ?[]const u8,
+    allocator: std.mem.Allocator,
+    full_path: []const u8,
+    rel_path: []const u8,
+    fork_filter: ?[]const u8,
     stop_on_fail: bool,
-    quiet:        bool,
-    stats:        *runner.RunStats,
+    quiet: bool,
+    stats: *runner.RunStats,
 ) !bool {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
@@ -190,9 +199,8 @@ fn printSummary(stats: runner.RunStats) void {
     std.debug.print("\n", .{});
     std.debug.print("============================================================\n", .{});
     std.debug.print("  Results:  {}/{} passed  ({}%)\n", .{ stats.passed, total, pct });
-    if (stats.failed  > 0) std.debug.print("  Failed:   {}\n", .{stats.failed});
+    if (stats.failed > 0) std.debug.print("  Failed:   {}\n", .{stats.failed});
     if (stats.skipped > 0) std.debug.print("  Skipped:  {}\n", .{stats.skipped});
     std.debug.print("============================================================\n", .{});
-    std.debug.print("STATS: passed={} failed={} skipped={}\n",
-        .{ stats.passed, stats.failed, stats.skipped });
+    std.debug.print("STATS: passed={} failed={} skipped={}\n", .{ stats.passed, stats.failed, stats.skipped });
 }

@@ -9,10 +9,10 @@
 /// On startup: parse genesis → import blocks → serve eth_getBlockByNumber on :8545.
 const std = @import("std");
 
-const fork_env  = @import("hive/fork_env.zig");
-const genesis   = @import("hive/genesis.zig");
+const fork_env = @import("hive/fork_env.zig");
+const genesis = @import("hive/genesis.zig");
 const chain_mod = @import("hive/chain.zig");
-const rpc       = @import("hive/rpc.zig");
+const rpc = @import("hive/rpc.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -27,11 +27,10 @@ pub fn main() !void {
     const fork = fork_env.loadFromEnv();
 
     // ── Parse genesis ─────────────────────────────────────────────────────────
-    const genesis_json = std.fs.cwd().readFileAlloc(alloc, "/genesis.json", 64 * 1024 * 1024)
-        catch |err| {
-            std.debug.print("hive-rlp: cannot read /genesis.json: {}\n", .{err});
-            std.process.exit(1);
-        };
+    const genesis_json = std.fs.cwd().readFileAlloc(alloc, "/genesis.json", 64 * 1024 * 1024) catch |err| {
+        std.debug.print("hive-rlp: cannot read /genesis.json: {}\n", .{err});
+        std.process.exit(1);
+    };
 
     // Determine genesis spec from fork schedule at block 0, timestamp from JSON
     // We do a quick parse to get the timestamp first, then re-parse fully.
@@ -55,8 +54,7 @@ pub fn main() !void {
         // Non-fatal: serve with whatever blocks we have
     };
 
-    std.debug.print("hive-rlp: chain height {}\n",
-        .{if (chain.getLatest()) |h| h.number else 0});
+    std.debug.print("hive-rlp: chain height {}\n", .{if (chain.getLatest()) |h| h.number else 0});
 
     // ── Serve JSON-RPC ────────────────────────────────────────────────────────
     std.debug.print("hive-rlp: listening on :8545\n", .{});
@@ -111,9 +109,11 @@ fn quickParseTimestamp(json: []const u8) u64 {
         while (i < json.len and json[i] != '"') i += 1;
         const s = json[start..i];
         const hex = if (std.mem.startsWith(u8, s, "0x") or std.mem.startsWith(u8, s, "0X"))
-            s[2..] else s;
+            s[2..]
+        else
+            s;
         return std.fmt.parseInt(u64, hex, 16) catch
-               std.fmt.parseInt(u64, hex, 10) catch 0;
+            std.fmt.parseInt(u64, hex, 10) catch 0;
     } else {
         const start = i;
         while (i < json.len and json[i] >= '0' and json[i] <= '9') i += 1;

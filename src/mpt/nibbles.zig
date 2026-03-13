@@ -14,7 +14,7 @@ const std = @import("std");
 /// Convert bytes to nibbles. `out` must have length >= bytes.len * 2.
 pub fn bytesToNibbles(bytes: []const u8, out: []u8) void {
     for (bytes, 0..) |byte, i| {
-        out[i * 2]     = byte >> 4;
+        out[i * 2] = byte >> 4;
         out[i * 2 + 1] = byte & 0x0f;
     }
 }
@@ -38,7 +38,10 @@ pub fn hpEncode(nibbles: []const u8, is_leaf: bool, out: []u8) []u8 {
         out[0] = ((flag | 1) << 4) | nibbles[0];
         var i: usize = 1;
         var j: usize = 1;
-        while (i + 1 < nibbles.len) : ({i += 2; j += 1;}) {
+        while (i + 1 < nibbles.len) : ({
+            i += 2;
+            j += 1;
+        }) {
             out[j] = (nibbles[i] << 4) | nibbles[i + 1];
         }
         return out[0 .. 1 + nibbles.len / 2];
@@ -47,7 +50,10 @@ pub fn hpEncode(nibbles: []const u8, is_leaf: bool, out: []u8) []u8 {
         out[0] = flag << 4;
         var i: usize = 0;
         var j: usize = 1;
-        while (i + 1 < nibbles.len) : ({i += 2; j += 1;}) {
+        while (i + 1 < nibbles.len) : ({
+            i += 2;
+            j += 1;
+        }) {
             out[j] = (nibbles[i] << 4) | nibbles[i + 1];
         }
         return out[0 .. 1 + nibbles.len / 2];
@@ -68,7 +74,7 @@ pub fn hpDecode(
     if (flag > 3) return error.InvalidHp;
 
     const is_leaf = (flag & 0x02) != 0;
-    const is_odd  = (flag & 0x01) != 0;
+    const is_odd = (flag & 0x01) != 0;
 
     var out_len: usize = 0;
 
@@ -80,7 +86,7 @@ pub fn hpDecode(
 
     // Unpack remaining bytes as pairs of nibbles.
     for (bytes[1..]) |byte| {
-        out[out_len]     = byte >> 4;
+        out[out_len] = byte >> 4;
         out[out_len + 1] = byte & 0x0f;
         out_len += 2;
     }

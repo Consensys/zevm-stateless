@@ -5,13 +5,13 @@
 //! (flat node pool), initialises a WitnessDatabase and then exercises one
 //! interface method.
 
-const std       = @import("std");
+const std = @import("std");
 const primitives = @import("primitives");
-const state_mod  = @import("state");
-const bytecode   = @import("bytecode");
-const mpt        = @import("mpt");
-const input      = @import("input");
-const db_mod     = @import("db");
+const state_mod = @import("state");
+const bytecode = @import("bytecode");
+const mpt = @import("mpt");
+const input = @import("input");
+const db_mod = @import("db");
 
 // ─── Known constants ───────────────────────────────────────────────────────────
 
@@ -34,26 +34,36 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 fn encBytes(buf: []u8, off: usize, data: []const u8) usize {
     var o = off;
     if (data.len == 0) {
-        buf[o] = 0x80; return o + 1;
+        buf[o] = 0x80;
+        return o + 1;
     } else if (data.len == 1 and data[0] <= 0x7f) {
-        buf[o] = data[0]; return o + 1;
+        buf[o] = data[0];
+        return o + 1;
     } else if (data.len <= 55) {
-        buf[o] = @intCast(0x80 + data.len); o += 1;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        buf[o] = @intCast(0x80 + data.len);
+        o += 1;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     } else {
         std.debug.assert(data.len <= 255);
-        buf[o] = 0xb8; buf[o + 1] = @intCast(data.len); o += 2;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        buf[o] = 0xb8;
+        buf[o + 1] = @intCast(data.len);
+        o += 2;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     }
 }
 
 fn encList(buf: []u8, off: usize, payload: []const u8) usize {
     var o = off;
     if (payload.len <= 55) {
-        buf[o] = @intCast(0xc0 + payload.len); o += 1;
+        buf[o] = @intCast(0xc0 + payload.len);
+        o += 1;
     } else {
         std.debug.assert(payload.len <= 255);
-        buf[o] = 0xf8; buf[o + 1] = @intCast(payload.len); o += 2;
+        buf[o] = 0xf8;
+        buf[o + 1] = @intCast(payload.len);
+        o += 2;
     }
     @memcpy(buf[o..][0..payload.len], payload);
     return o + payload.len;
@@ -61,35 +71,51 @@ fn encList(buf: []u8, off: usize, payload: []const u8) usize {
 
 fn buildAccountRlp(
     buf: []u8,
-    nonce: u64, balance: u256,
-    storage_root: primitives.Hash, code_hash: primitives.Hash,
+    nonce: u64,
+    balance: u256,
+    storage_root: primitives.Hash,
+    code_hash: primitives.Hash,
 ) usize {
     var payload: [200]u8 = undefined;
     var pl: usize = 0;
     // nonce
     if (nonce == 0) {
-        payload[pl] = 0x80; pl += 1;
+        payload[pl] = 0x80;
+        pl += 1;
     } else {
         var tmp: [8]u8 = undefined;
-        var n = nonce; var nb: usize = 0;
-        while (n > 0) : (nb += 1) { tmp[7 - nb] = @intCast(n & 0xff); n >>= 8; }
+        var n = nonce;
+        var nb: usize = 0;
+        while (n > 0) : (nb += 1) {
+            tmp[7 - nb] = @intCast(n & 0xff);
+            n >>= 8;
+        }
         pl = encBytes(&payload, pl, tmp[8 - nb ..]);
     }
     // balance
     if (balance == 0) {
-        payload[pl] = 0x80; pl += 1;
+        payload[pl] = 0x80;
+        pl += 1;
     } else {
         var tmp: [32]u8 = undefined;
-        var b = balance; var nb: usize = 0;
-        while (b > 0) : (nb += 1) { tmp[31 - nb] = @intCast(b & 0xff); b >>= 8; }
+        var b = balance;
+        var nb: usize = 0;
+        while (b > 0) : (nb += 1) {
+            tmp[31 - nb] = @intCast(b & 0xff);
+            b >>= 8;
+        }
         pl = encBytes(&payload, pl, tmp[32 - nb ..]);
     }
     // storageRoot
-    payload[pl] = 0xa0; pl += 1;
-    @memcpy(payload[pl..][0..32], &storage_root); pl += 32;
+    payload[pl] = 0xa0;
+    pl += 1;
+    @memcpy(payload[pl..][0..32], &storage_root);
+    pl += 32;
     // codeHash
-    payload[pl] = 0xa0; pl += 1;
-    @memcpy(payload[pl..][0..32], &code_hash); pl += 32;
+    payload[pl] = 0xa0;
+    pl += 1;
+    @memcpy(payload[pl..][0..32], &code_hash);
+    pl += 32;
     return encList(buf, 0, payload[0..pl]);
 }
 
@@ -105,7 +131,9 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
 }
 
 fn buildEmptyBranchNode(buf: []u8) usize {
-    buf[0] = 0xd1; @memset(buf[1..18], 0x80); return 18;
+    buf[0] = 0xd1;
+    @memset(buf[1..18], 0x80);
+    return 18;
 }
 
 // ─── Test 1: basic — account found in pool ────────────────────────────────────
@@ -125,10 +153,10 @@ test "basic returns verified AccountInfo" {
 
     const w = input.StateWitness{
         .state_root = state_root,
-        .nodes      = &[_][]const u8{leaf_bytes},
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &[_][]const u8{leaf_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const info = try wdb.basic(address);
@@ -150,10 +178,10 @@ test "basic returns null for valid non-inclusion proof (empty trie)" {
 
     const w = input.StateWitness{
         .state_root = state_root,
-        .nodes      = &[_][]const u8{branch[0..branch_len]},
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &[_][]const u8{branch[0..branch_len]},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const info = try wdb.basic(address);
@@ -166,8 +194,10 @@ test "basic returns null for valid non-inclusion proof (empty trie)" {
 // finds the suffix does not match addr2's key nibbles, and returns null.
 
 test "basic returns null when queried address differs from trie leaf" {
-    var addr1: primitives.Address = @splat(0x00); addr1[19] = 0x01;
-    var addr2: primitives.Address = @splat(0x00); addr2[19] = 0x02;
+    var addr1: primitives.Address = @splat(0x00);
+    addr1[19] = 0x01;
+    var addr2: primitives.Address = @splat(0x00);
+    addr2[19] = 0x02;
 
     const key_hash1 = mpt.keccak256(&addr1);
     var account_rlp: [200]u8 = undefined;
@@ -179,10 +209,10 @@ test "basic returns null when queried address differs from trie leaf" {
 
     const w = input.StateWitness{
         .state_root = state_root,
-        .nodes      = &[_][]const u8{leaf_bytes},
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &[_][]const u8{leaf_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const info = try wdb.basic(addr2);
@@ -194,10 +224,10 @@ test "basic returns null when queried address differs from trie leaf" {
 test "codeByHash(KECCAK_EMPTY) returns empty Bytecode" {
     const w = input.StateWitness{
         .state_root = [_]u8{0} ** 32,
-        .nodes      = &.{},
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &.{},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const code = try wdb.codeByHash(KECCAK_EMPTY);
@@ -212,10 +242,10 @@ test "codeByHash returns contract bytecode from witness.codes" {
 
     const w = input.StateWitness{
         .state_root = [_]u8{0} ** 32,
-        .nodes      = &.{},
-        .codes      = &[_][]const u8{contract_code},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &.{},
+        .codes = &[_][]const u8{contract_code},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const code = try wdb.codeByHash(code_hash);
@@ -230,12 +260,21 @@ test "codeByHash returns contract bytecode from witness.codes" {
 // using the same pool for both traversals.
 
 test "storage returns verified slot value" {
-    var address: primitives.Address = @splat(0x00); address[19] = 0x55;
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x55;
     const slot_key: u256 = 3;
 
     // Storage leaf: slot 3 → 0xabcd.
     var slot_hash: primitives.Hash = @splat(0);
-    { var n = slot_key; var si: usize = 32; while (si > 0) { si -= 1; slot_hash[si] = @intCast(n & 0xff); n >>= 8; } }
+    {
+        var n = slot_key;
+        var si: usize = 32;
+        while (si > 0) {
+            si -= 1;
+            slot_hash[si] = @intCast(n & 0xff);
+            n >>= 8;
+        }
+    }
     const storage_key_hash = mpt.keccak256(&slot_hash);
     const rlp_value = &[_]u8{ 0x82, 0xab, 0xcd };
     var storage_leaf: [256]u8 = undefined;
@@ -255,10 +294,10 @@ test "storage returns verified slot value" {
     // Flat pool contains both leaves.
     const w = input.StateWitness{
         .state_root = state_root,
-        .nodes      = &[_][]const u8{ acc_leaf_bytes, storage_leaf_bytes },
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &[_][]const u8{ acc_leaf_bytes, storage_leaf_bytes },
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const value = try wdb.storage(address, slot_key);
@@ -271,7 +310,8 @@ test "storage returns verified slot value" {
 // verifyProof short-circuits to null without requiring any pool nodes.
 
 test "storage returns 0 for account with empty storage trie" {
-    var address: primitives.Address = @splat(0x00); address[19] = 0x66;
+    var address: primitives.Address = @splat(0x00);
+    address[19] = 0x66;
     const key_hash = mpt.keccak256(&address);
 
     var account_rlp: [200]u8 = undefined;
@@ -284,10 +324,10 @@ test "storage returns 0 for account with empty storage trie" {
     // Pool contains only the account leaf; no storage nodes needed.
     const w = input.StateWitness{
         .state_root = state_root,
-        .nodes      = &[_][]const u8{leaf_bytes},
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &[_][]const u8{leaf_bytes},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const value = try wdb.storage(address, 42);
@@ -299,10 +339,10 @@ test "storage returns 0 for account with empty storage trie" {
 test "blockHash returns zero hash (Phase 3 placeholder)" {
     const w = input.StateWitness{
         .state_root = [_]u8{0} ** 32,
-        .nodes      = &.{},
-        .codes      = &.{},
-        .keys       = &.{},
-        .headers    = &.{},
+        .nodes = &.{},
+        .codes = &.{},
+        .keys = &.{},
+        .headers = &.{},
     };
     var wdb = db_mod.WitnessDatabase.init(w);
     const hash = try wdb.blockHash(12345678);

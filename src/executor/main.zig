@@ -8,18 +8,18 @@
 //!   5. Compute the post-state root and receipts root.
 //!   6. Return a ProofOutput for the guest to commit.
 
-const std        = @import("std");
+const std = @import("std");
 const primitives = @import("primitives");
-const context    = @import("context");
-const input      = @import("input");
-const output     = @import("output");
-const mpt        = @import("mpt");
+const context = @import("context");
+const input = @import("input");
+const output = @import("output");
+const mpt = @import("mpt");
 
 const transition_mod = @import("executor_transition");
-const output_mod     = @import("executor_output");
-const fork_mod       = @import("executor_fork");
-const tx_decode      = @import("executor_tx_decode");
-const types          = @import("executor_types");
+const output_mod = @import("executor_output");
+const fork_mod = @import("executor_fork");
+const tx_decode = @import("executor_tx_decode");
+const types = @import("executor_types");
 
 pub fn executeBlock(
     alloc: std.mem.Allocator,
@@ -40,7 +40,9 @@ pub fn executeBlock(
             current_addr = addr;
 
             const account_state = mpt.verifyAccount(
-                stateless_input.witness.state_root, addr, stateless_input.witness.nodes,
+                stateless_input.witness.state_root,
+                addr,
+                stateless_input.witness.nodes,
             ) catch null orelse continue;
 
             // Locate bytecode in the witness codes pool.
@@ -60,13 +62,12 @@ pub fn executeBlock(
             const entry = try pre_alloc.getOrPut(alloc, addr);
             if (!entry.found_existing) {
                 entry.value_ptr.* = types.AllocAccount{
-                    .balance          = account_state.balance,
-                    .nonce            = account_state.nonce,
-                    .code             = code,
+                    .balance = account_state.balance,
+                    .nonce = account_state.nonce,
+                    .code = code,
                     .pre_storage_root = account_state.storage_root,
                 };
             }
-
         } else if (key.len == 52) {
             var addr: types.Address = undefined;
             @memcpy(&addr, key[0..20]);
@@ -75,11 +76,15 @@ pub fn executeBlock(
             @memcpy(&raw_slot, key[20..52]);
 
             const acct_state = mpt.verifyAccount(
-                stateless_input.witness.state_root, addr, stateless_input.witness.nodes,
+                stateless_input.witness.state_root,
+                addr,
+                stateless_input.witness.nodes,
             ) catch null orelse continue;
 
             const value = mpt.verifyStorage(
-                acct_state.storage_root, raw_slot, stateless_input.witness.nodes,
+                acct_state.storage_root,
+                raw_slot,
+                stateless_input.witness.nodes,
             ) catch 0;
             if (value != 0) {
                 const entry = try pre_alloc.getOrPut(alloc, addr);
@@ -87,18 +92,21 @@ pub fn executeBlock(
                 const slot_key = hashToU256(raw_slot);
                 try entry.value_ptr.*.storage.put(alloc, slot_key, value);
             }
-
         } else if (key.len == 32) {
             if (current_addr) |addr| {
                 var raw_slot: types.Hash = undefined;
                 @memcpy(&raw_slot, key[0..32]);
 
                 const acct_state = mpt.verifyAccount(
-                    stateless_input.witness.state_root, addr, stateless_input.witness.nodes,
+                    stateless_input.witness.state_root,
+                    addr,
+                    stateless_input.witness.nodes,
                 ) catch null orelse continue;
 
                 const value = mpt.verifyStorage(
-                    acct_state.storage_root, raw_slot, stateless_input.witness.nodes,
+                    acct_state.storage_root,
+                    raw_slot,
+                    stateless_input.witness.nodes,
                 ) catch 0;
                 if (value != 0) {
                     const entry = try pre_alloc.getOrPut(alloc, addr);
@@ -116,7 +124,7 @@ pub fn executeBlock(
         const hash = mpt.keccak256(hdr_rlp);
         const outer = mpt.rlp.decodeItem(hdr_rlp) catch continue;
         var hdr_rest = switch (outer.item) {
-            .list  => |p| p,
+            .list => |p| p,
             .bytes => continue,
         };
         // Skip fields 0–7: parentHash, ommersHash, coinbase, stateRoot,
@@ -131,7 +139,7 @@ pub fn executeBlock(
         const num_r = mpt.rlp.decodeItem(hdr_rest) catch continue;
         const num_bytes = switch (num_r.item) {
             .bytes => |b| b,
-            .list  => continue,
+            .list => continue,
         };
         if (num_bytes.len > 8) continue;
         var number: u64 = 0;
@@ -147,56 +155,60 @@ pub fn executeBlock(
     const withdrawals = try alloc.alloc(types.Withdrawal, stateless_input.withdrawals.len);
     for (stateless_input.withdrawals, 0..) |wd, i| {
         withdrawals[i] = .{
-            .index           = wd.index,
+            .index = wd.index,
             .validator_index = wd.validator_index,
-            .address         = wd.address,
-            .amount          = wd.amount,
+            .address = wd.address,
+            .amount = wd.amount,
         };
     }
 
-    const env    = types.Env{
-        .coinbase                 = header.beneficiary,
-        .gas_limit                = header.gas_limit,
-        .number                   = header.number,
-        .timestamp                = header.timestamp,
-        .difficulty               = header.difficulty,
-        .base_fee                 = header.base_fee_per_gas,
-        .random                   = header.mix_hash,
-        .excess_blob_gas          = header.excess_blob_gas,
+    const env = types.Env{
+        .coinbase = header.beneficiary,
+        .gas_limit = header.gas_limit,
+        .number = header.number,
+        .timestamp = header.timestamp,
+        .difficulty = header.difficulty,
+        .base_fee = header.base_fee_per_gas,
+        .random = header.mix_hash,
+        .excess_blob_gas = header.excess_blob_gas,
         .parent_beacon_block_root = header.parent_beacon_block_root,
-        .parent_hash              = header.parent_hash,
-        .block_hashes             = block_hashes.items,
-        .withdrawals              = withdrawals,
+        .parent_hash = header.parent_hash,
+        .block_hashes = block_hashes.items,
+        .withdrawals = withdrawals,
     };
 
     // 5. Map decoded transactions to TxInput and execute the block.
-    const txs    = try tx_decode.decodeTxsFromInput(alloc, stateless_input.transactions);
+    const txs = try tx_decode.decodeTxsFromInput(alloc, stateless_input.transactions);
     const result = try transition_mod.transition(
-        alloc, pre_alloc, env, txs, spec,
+        alloc,
+        pre_alloc,
+        env,
+        txs,
+        spec,
         1, // chain_id = mainnet
         fork_mod.blockReward(spec),
     );
 
     // 6. Compute post-state and receipts roots.
     const post_state_root = try output_mod.computeStateRootDelta(alloc, pre_state_root, result.alloc, stateless_input.witness.nodes);
-    const receipts_root   = try output_mod.computeReceiptsRoot(alloc, result.receipts);
+    const receipts_root = try output_mod.computeReceiptsRoot(alloc, result.receipts);
 
     // Map transition.Receipt → output.ReceiptData.
     const receipts_data = try alloc.alloc(output.ReceiptData, result.receipts.len);
     for (result.receipts, 0..) |r, i| {
         receipts_data[i] = .{
             .cumulative_gas_used = r.cumulative_gas_used,
-            .success             = r.status == 1,
-            .logs_bloom          = r.logs_bloom,
+            .success = r.status == 1,
+            .logs_bloom = r.logs_bloom,
         };
     }
 
     return output.ProofOutput{
-        .pre_state_root  = pre_state_root,
+        .pre_state_root = pre_state_root,
         .post_state_root = post_state_root,
-        .receipts_root   = receipts_root,
-        .receipts        = receipts_data,
-        .fork_name       = fork_mod.specName(spec),
+        .receipts_root = receipts_root,
+        .receipts = receipts_data,
+        .fork_name = fork_mod.specName(spec),
     };
 }
 
@@ -204,13 +216,13 @@ pub fn executeBlock(
 pub fn blockEnvFromHeader(header: input.BlockHeader) context.BlockEnv {
     var block_env = context.BlockEnv.default();
 
-    block_env.number      = @as(primitives.U256, header.number);
+    block_env.number = @as(primitives.U256, header.number);
     block_env.beneficiary = header.beneficiary;
-    block_env.timestamp   = @as(primitives.U256, header.timestamp);
-    block_env.gas_limit   = header.gas_limit;
-    block_env.basefee     = header.base_fee_per_gas orelse 0;
-    block_env.difficulty  = @as(primitives.U256, 0); // always 0 for PoS
-    block_env.prevrandao  = header.mix_hash;
+    block_env.timestamp = @as(primitives.U256, header.timestamp);
+    block_env.gas_limit = header.gas_limit;
+    block_env.basefee = header.base_fee_per_gas orelse 0;
+    block_env.difficulty = @as(primitives.U256, 0); // always 0 for PoS
+    block_env.prevrandao = header.mix_hash;
 
     block_env.setBlobExcessGasAndPrice(
         header.excess_blob_gas orelse 0,

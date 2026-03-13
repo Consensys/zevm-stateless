@@ -117,7 +117,10 @@ pub fn main() !void {
         for (paths.items) |rel_path| {
             var skip = false;
             for (skip_list) |s| {
-                if (std.mem.eql(u8, rel_path, s)) { skip = true; break; }
+                if (std.mem.eql(u8, rel_path, s)) {
+                    skip = true;
+                    break;
+                }
             }
             if (skip) {
                 stats.skipped += 1;
@@ -163,10 +166,10 @@ pub fn main() !void {
                             stats.skipped += std.fmt.parseInt(u64, kv["skipped=".len..], 10) catch 0;
                     }
                 } else if (!std.mem.startsWith(u8, line, "===") and
-                           !std.mem.startsWith(u8, line, "  Results:") and
-                           !std.mem.startsWith(u8, line, "  Failed:") and
-                           !std.mem.startsWith(u8, line, "  Skipped:") and
-                           line.len > 0)
+                    !std.mem.startsWith(u8, line, "  Results:") and
+                    !std.mem.startsWith(u8, line, "  Failed:") and
+                    !std.mem.startsWith(u8, line, "  Skipped:") and
+                    line.len > 0)
                 {
                     std.debug.print("{s}\n", .{line});
                 }

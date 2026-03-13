@@ -6,8 +6,8 @@
 
 const std = @import("std");
 const primitives = @import("primitives");
-const mpt        = @import("mpt");
-const input      = @import("input");
+const mpt = @import("mpt");
+const input = @import("input");
 
 // ─── Known constants ───────────────────────────────────────────────────────────
 
@@ -30,26 +30,36 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 fn encBytes(buf: []u8, off: usize, data: []const u8) usize {
     var o = off;
     if (data.len == 0) {
-        buf[o] = 0x80; return o + 1;
+        buf[o] = 0x80;
+        return o + 1;
     } else if (data.len == 1 and data[0] <= 0x7f) {
-        buf[o] = data[0]; return o + 1;
+        buf[o] = data[0];
+        return o + 1;
     } else if (data.len <= 55) {
-        buf[o] = @intCast(0x80 + data.len); o += 1;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        buf[o] = @intCast(0x80 + data.len);
+        o += 1;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     } else {
         std.debug.assert(data.len <= 255);
-        buf[o] = 0xb8; buf[o + 1] = @intCast(data.len); o += 2;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        buf[o] = 0xb8;
+        buf[o + 1] = @intCast(data.len);
+        o += 2;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     }
 }
 
 fn encList(buf: []u8, off: usize, payload: []const u8) usize {
     var o = off;
     if (payload.len <= 55) {
-        buf[o] = @intCast(0xc0 + payload.len); o += 1;
+        buf[o] = @intCast(0xc0 + payload.len);
+        o += 1;
     } else {
         std.debug.assert(payload.len <= 255);
-        buf[o] = 0xf8; buf[o + 1] = @intCast(payload.len); o += 2;
+        buf[o] = 0xf8;
+        buf[o + 1] = @intCast(payload.len);
+        o += 2;
     }
     @memcpy(buf[o..][0..payload.len], payload);
     return o + payload.len;
@@ -57,23 +67,47 @@ fn encList(buf: []u8, off: usize, payload: []const u8) usize {
 
 fn buildAccountRlp(
     buf: []u8,
-    nonce: u64, balance: u256,
-    storage_root: primitives.Hash, code_hash: primitives.Hash,
+    nonce: u64,
+    balance: u256,
+    storage_root: primitives.Hash,
+    code_hash: primitives.Hash,
 ) usize {
     var payload: [200]u8 = undefined;
     var pl: usize = 0;
-    if (nonce == 0) { payload[pl] = 0x80; pl += 1; } else {
-        var tmp: [8]u8 = undefined; var n = nonce; var nb: usize = 0;
-        while (n > 0) : (nb += 1) { tmp[7 - nb] = @intCast(n & 0xff); n >>= 8; }
+    if (nonce == 0) {
+        payload[pl] = 0x80;
+        pl += 1;
+    } else {
+        var tmp: [8]u8 = undefined;
+        var n = nonce;
+        var nb: usize = 0;
+        while (n > 0) : (nb += 1) {
+            tmp[7 - nb] = @intCast(n & 0xff);
+            n >>= 8;
+        }
         pl = encBytes(&payload, pl, tmp[8 - nb ..]);
     }
-    if (balance == 0) { payload[pl] = 0x80; pl += 1; } else {
-        var tmp: [32]u8 = undefined; var b = balance; var nb: usize = 0;
-        while (b > 0) : (nb += 1) { tmp[31 - nb] = @intCast(b & 0xff); b >>= 8; }
+    if (balance == 0) {
+        payload[pl] = 0x80;
+        pl += 1;
+    } else {
+        var tmp: [32]u8 = undefined;
+        var b = balance;
+        var nb: usize = 0;
+        while (b > 0) : (nb += 1) {
+            tmp[31 - nb] = @intCast(b & 0xff);
+            b >>= 8;
+        }
         pl = encBytes(&payload, pl, tmp[32 - nb ..]);
     }
-    payload[pl] = 0xa0; pl += 1; @memcpy(payload[pl..][0..32], &storage_root); pl += 32;
-    payload[pl] = 0xa0; pl += 1; @memcpy(payload[pl..][0..32], &code_hash);    pl += 32;
+    payload[pl] = 0xa0;
+    pl += 1;
+    @memcpy(payload[pl..][0..32], &storage_root);
+    pl += 32;
+    payload[pl] = 0xa0;
+    pl += 1;
+    @memcpy(payload[pl..][0..32], &code_hash);
+    pl += 32;
     return encList(buf, 0, payload[0..pl]);
 }
 
@@ -89,7 +123,9 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
 }
 
 fn buildEmptyBranchNode(buf: []u8) usize {
-    buf[0] = 0xd1; @memset(buf[1..18], 0x80); return 18;
+    buf[0] = 0xd1;
+    @memset(buf[1..18], 0x80);
+    return 18;
 }
 
 // ─── Test 1: account inclusion — single-leaf pool ─────────────────────────────
@@ -204,10 +240,10 @@ test "verifyWitness — single account in pool" {
 
     const w = input.StateWitness{
         .state_root = state_root,
-        .nodes      = &[_][]const u8{leaf_bytes},
-        .codes      = &.{},
-        .keys       = &[_][]const u8{&address},
-        .headers    = &.{},
+        .nodes = &[_][]const u8{leaf_bytes},
+        .codes = &.{},
+        .keys = &[_][]const u8{&address},
+        .headers = &.{},
     };
     const proven_root = try mpt.verifyWitness(w);
     try std.testing.expectEqualSlices(u8, &state_root, &proven_root);

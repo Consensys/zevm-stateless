@@ -11,10 +11,10 @@
 
 const std = @import("std");
 const primitives = @import("primitives");
-const state     = @import("state");
-const bytecode  = @import("bytecode");
-const mpt       = @import("mpt");
-const input     = @import("input");
+const state = @import("state");
+const bytecode = @import("bytecode");
+const mpt = @import("mpt");
+const input = @import("input");
 
 pub const DbError = error{
     /// MPT proof verification failed — witness is inconsistent with state root.
@@ -52,13 +52,15 @@ pub const WitnessDatabase = struct {
     /// Returns `DbError.InvalidWitness` if the MPT proof is malformed.
     pub fn basic(self: *Self, address: primitives.Address) !?state.AccountInfo {
         const account_state = mpt.verifyAccount(
-            self.witness.state_root, address, self.witness.nodes,
+            self.witness.state_root,
+            address,
+            self.witness.nodes,
         ) catch return DbError.InvalidWitness;
 
         const as = account_state orelse return null;
         return state.AccountInfo{
-            .balance   = as.balance,
-            .nonce     = as.nonce,
+            .balance = as.balance,
+            .nonce = as.nonce,
             .code_hash = as.code_hash,
             // Bytecode is served on demand via codeByHash; set null here
             // so zevm fetches it through that path when needed.
@@ -99,11 +101,13 @@ pub const WitnessDatabase = struct {
     pub fn storage(
         self: *Self,
         address: primitives.Address,
-        index:   primitives.StorageKey,
+        index: primitives.StorageKey,
     ) !primitives.StorageValue {
         // Resolve the account's storage root first.
         const account_state = mpt.verifyAccount(
-            self.witness.state_root, address, self.witness.nodes,
+            self.witness.state_root,
+            address,
+            self.witness.nodes,
         ) catch return DbError.InvalidWitness;
 
         const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
@@ -112,8 +116,7 @@ pub const WitnessDatabase = struct {
         const slot = u256ToHash(index);
 
         // Verify the storage proof using the shared flat node pool.
-        return mpt.verifyStorage(storage_root, slot, self.witness.nodes)
-            catch return DbError.InvalidWitness;
+        return mpt.verifyStorage(storage_root, slot, self.witness.nodes) catch return DbError.InvalidWitness;
     }
 
     // ── blockHash ───────────────────────────────────────────────────────────

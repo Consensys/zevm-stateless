@@ -4,41 +4,41 @@
 /// commits valid blocks (state root + receipts root match header), and
 /// provides block lookup by number.
 const std = @import("std");
-const primitives     = @import("primitives");
-const types          = @import("executor_types");
+const primitives = @import("primitives");
+const types = @import("executor_types");
 const transition_mod = @import("executor_transition");
-const output_mod     = @import("executor_output");
-const fork_mod       = @import("executor_fork");
-const tx_decode_mod  = @import("executor_tx_decode");
-const rlp_dec        = @import("mpt").rlp;
-const ForkSchedule   = @import("fork_env.zig").ForkSchedule;
+const output_mod = @import("executor_output");
+const fork_mod = @import("executor_fork");
+const tx_decode_mod = @import("executor_tx_decode");
+const rlp_dec = @import("mpt").rlp;
+const ForkSchedule = @import("fork_env.zig").ForkSchedule;
 
-const Address  = types.Address;
-const Hash     = types.Hash;
+const Address = types.Address;
+const Hash = types.Hash;
 const AllocMap = std.AutoHashMapUnmanaged(Address, types.AllocAccount);
 
 pub const StoredHeader = struct {
     number: u64,
-    hash:   Hash,
+    hash: Hash,
 };
 
 pub const Chain = struct {
-    arena:         std.heap.ArenaAllocator,
+    arena: std.heap.ArenaAllocator,
     current_alloc: AllocMap,
-    headers:       std.ArrayListUnmanaged(StoredHeader),
-    fork:          ForkSchedule,
+    headers: std.ArrayListUnmanaged(StoredHeader),
+    fork: ForkSchedule,
 
     pub fn init(
-        backing:       std.mem.Allocator,
+        backing: std.mem.Allocator,
         genesis_alloc: AllocMap,
-        genesis_hash:  Hash,
-        fork:          ForkSchedule,
+        genesis_hash: Hash,
+        fork: ForkSchedule,
     ) Chain {
         var c = Chain{
-            .arena         = std.heap.ArenaAllocator.init(backing),
+            .arena = std.heap.ArenaAllocator.init(backing),
             .current_alloc = .{},
-            .headers       = .{},
-            .fork          = fork,
+            .headers = .{},
+            .fork = fork,
         };
         const alloc = c.arena.allocator();
         c.current_alloc = cloneAllocMap(alloc, genesis_alloc) catch .{};
@@ -60,14 +60,14 @@ pub const Chain = struct {
         // ── Outer block list ──────────────────────────────────────────────────
         const outer = try rlp_dec.decodeItem(block_rlp);
         const block_payload = switch (outer.item) {
-            .list  => |p| p,
+            .list => |p| p,
             .bytes => return error.InvalidBlock,
         };
 
         // ── Header ────────────────────────────────────────────────────────────
         const hdr_r = try rlp_dec.decodeItem(block_payload);
         const hdr_payload = switch (hdr_r.item) {
-            .list  => |p| p,
+            .list => |p| p,
             .bytes => return error.InvalidBlock,
         };
 
@@ -79,15 +79,15 @@ pub const Chain = struct {
 
         // ── Transactions ──────────────────────────────────────────────────────
         const after_hdr = block_payload[hdr_r.consumed..];
-        const raw_txs   = try decodeTxList(alloc, after_hdr);
-        const txs       = try tx_decode_mod.decodeTxs(alloc, raw_txs);
+        const raw_txs = try decodeTxList(alloc, after_hdr);
+        const txs = try tx_decode_mod.decodeTxs(alloc, raw_txs);
 
         // ── Withdrawals ───────────────────────────────────────────────────────
         const withdrawals_const = decodeWithdrawals(alloc, after_hdr) catch &.{};
         const withdrawals = @constCast(withdrawals_const);
 
         // ── Fork / spec ───────────────────────────────────────────────────────
-        const spec   = self.fork.specAt(hdr.number, hdr.timestamp);
+        const spec = self.fork.specAt(hdr.number, hdr.timestamp);
         const reward = fork_mod.blockReward(spec);
 
         // ── Block-hash table (last 256 ancestors) ──────────────────────────────
@@ -95,28 +95,33 @@ pub const Chain = struct {
 
         // ── Env ───────────────────────────────────────────────────────────────
         var env = types.Env{};
-        env.coinbase     = hdr.coinbase;
-        env.gas_limit    = hdr.gas_limit;
-        env.number       = hdr.number;
-        env.timestamp    = hdr.timestamp;
+        env.coinbase = hdr.coinbase;
+        env.gas_limit = hdr.gas_limit;
+        env.number = hdr.number;
+        env.timestamp = hdr.timestamp;
         env.block_hashes = bh_slice;
-        env.withdrawals  = withdrawals;
-        env.parent_hash  = hdr.parent_hash; // EIP-2935
+        env.withdrawals = withdrawals;
+        env.parent_hash = hdr.parent_hash; // EIP-2935
 
         if (primitives.isEnabledIn(spec, .merge)) {
-            env.random     = hdr.mix_hash;
+            env.random = hdr.mix_hash;
             env.difficulty = 0;
         } else {
             env.difficulty = hdr.difficulty;
         }
-        if (hdr.base_fee)                 |bf| env.base_fee                 = @as(u64, @intCast(bf));
-        if (hdr.excess_blob_gas)          |eg| env.excess_blob_gas          = eg;
+        if (hdr.base_fee) |bf| env.base_fee = @as(u64, @intCast(bf));
+        if (hdr.excess_blob_gas) |eg| env.excess_blob_gas = eg;
         if (hdr.parent_beacon_block_root) |pb| env.parent_beacon_block_root = pb;
 
         // ── Execute ───────────────────────────────────────────────────────────
         const result = transition_mod.transition(
-            alloc, self.current_alloc, env, txs,
-            spec, self.fork.chain_id, reward,
+            alloc,
+            self.current_alloc,
+            env,
+            txs,
+            spec,
+            self.fork.chain_id,
+            reward,
         ) catch return; // execution error = invalid block, discard
 
         // ── Verify state root ─────────────────────────────────────────────────
@@ -152,59 +157,62 @@ pub const Chain = struct {
 // ─── Block header decoder ─────────────────────────────────────────────────────
 
 const BlockHeader = struct {
-    parent_hash:   Hash,
-    coinbase:      Address,
-    state_root:    Hash,
+    parent_hash: Hash,
+    coinbase: Address,
+    state_root: Hash,
     receipts_root: Hash,
-    difficulty:    u256,
-    number:        u64,
-    gas_limit:     u64,
-    gas_used:      u64,
-    timestamp:     u64,
-    mix_hash:      Hash,
-    base_fee:                 ?u256 = null,
-    excess_blob_gas:          ?u64  = null,
+    difficulty: u256,
+    number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    mix_hash: Hash,
+    base_fee: ?u256 = null,
+    excess_blob_gas: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
 };
 
 fn decodeHeader(payload: []const u8) !BlockHeader {
     var hdr = BlockHeader{
-        .parent_hash   = [_]u8{0} ** 32,
-        .coinbase      = [_]u8{0} ** 20,
-        .state_root    = [_]u8{0} ** 32,
+        .parent_hash = [_]u8{0} ** 32,
+        .coinbase = [_]u8{0} ** 20,
+        .state_root = [_]u8{0} ** 32,
         .receipts_root = [_]u8{0} ** 32,
-        .difficulty    = 0,
-        .number        = 0,
-        .gas_limit     = 0,
-        .gas_used      = 0,
-        .timestamp     = 0,
-        .mix_hash      = [_]u8{0} ** 32,
+        .difficulty = 0,
+        .number = 0,
+        .gas_limit = 0,
+        .gas_used = 0,
+        .timestamp = 0,
+        .mix_hash = [_]u8{0} ** 32,
     };
     var rest = payload;
     var idx: usize = 0;
     while (rest.len > 0) : (idx += 1) {
         const r = try rlp_dec.decodeItem(rest);
-        const b = switch (r.item) { .bytes => |v| v, .list => &.{} };
+        const b = switch (r.item) {
+            .bytes => |v| v,
+            .list => &.{},
+        };
         switch (idx) {
-            0  => hdr.parent_hash   = toHash(b),
+            0 => hdr.parent_hash = toHash(b),
             // 1 = uncleHash (skip)
-            2  => hdr.coinbase      = toAddr(b),
-            3  => hdr.state_root    = toHash(b),
+            2 => hdr.coinbase = toAddr(b),
+            3 => hdr.state_root = toHash(b),
             // 4 = txsRoot (skip)
-            5  => hdr.receipts_root = toHash(b),
+            5 => hdr.receipts_root = toHash(b),
             // 6 = logsBloom (skip)
-            7  => hdr.difficulty    = toU256(b),
-            8  => hdr.number        = toU64(b),
-            9  => hdr.gas_limit     = toU64(b),
-            10 => hdr.gas_used      = toU64(b),
-            11 => hdr.timestamp     = toU64(b),
+            7 => hdr.difficulty = toU256(b),
+            8 => hdr.number = toU64(b),
+            9 => hdr.gas_limit = toU64(b),
+            10 => hdr.gas_used = toU64(b),
+            11 => hdr.timestamp = toU64(b),
             // 12 = extraData (skip)
-            13 => hdr.mix_hash      = toHash(b),
+            13 => hdr.mix_hash = toHash(b),
             // 14 = nonce (skip)
-            15 => hdr.base_fee      = toU256(b),
+            15 => hdr.base_fee = toU256(b),
             // 16 = withdrawalsRoot (skip)
             // 17 = blobGasUsed (skip)
-            18 => hdr.excess_blob_gas          = toU64(b),
+            18 => hdr.excess_blob_gas = toU64(b),
             19 => hdr.parent_beacon_block_root = toHash(b),
             else => {},
         }
@@ -219,7 +227,7 @@ fn decodeHeader(payload: []const u8) !BlockHeader {
 fn decodeTxList(alloc: std.mem.Allocator, after_hdr: []const u8) ![]const []const u8 {
     const txns_r = try rlp_dec.decodeItem(after_hdr);
     const txns_payload = switch (txns_r.item) {
-        .list  => |p| p,
+        .list => |p| p,
         .bytes => return &.{},
     };
     var count: usize = 0;
@@ -235,7 +243,7 @@ fn decodeTxList(alloc: std.mem.Allocator, after_hdr: []const u8) ![]const []cons
         const r = try rlp_dec.decodeItem(txns_payload[offset..]);
         txns[i] = switch (r.item) {
             .bytes => |bv| bv,
-            .list  => txns_payload[offset .. offset + r.consumed],
+            .list => txns_payload[offset .. offset + r.consumed],
         };
         offset += r.consumed;
     }
@@ -245,14 +253,14 @@ fn decodeTxList(alloc: std.mem.Allocator, after_hdr: []const u8) ![]const []cons
 /// Decode withdrawals from block outer payload after header.
 /// Layout: [txns_list, uncles_list, ?withdrawals_list]
 fn decodeWithdrawals(alloc: std.mem.Allocator, after_hdr: []const u8) ![]types.Withdrawal {
-    const txns_r   = try rlp_dec.decodeItem(after_hdr);
+    const txns_r = try rlp_dec.decodeItem(after_hdr);
     const uncles_r = try rlp_dec.decodeItem(after_hdr[txns_r.consumed..]);
     const after_uncles = after_hdr[txns_r.consumed + uncles_r.consumed ..];
     if (after_uncles.len == 0) return &.{};
 
     const wd_r = try rlp_dec.decodeItem(after_uncles);
     const wd_payload = switch (wd_r.item) {
-        .list  => |p| p,
+        .list => |p| p,
         .bytes => return &.{},
     };
 
@@ -261,23 +269,29 @@ fn decodeWithdrawals(alloc: std.mem.Allocator, after_hdr: []const u8) ![]types.W
     while (rest.len > 0) {
         const wd_item = try rlp_dec.decodeItem(rest);
         const wd_p = switch (wd_item.item) {
-            .list  => |p| p,
-            .bytes => { rest = rest[wd_item.consumed..]; continue; },
+            .list => |p| p,
+            .bytes => {
+                rest = rest[wd_item.consumed..];
+                continue;
+            },
         };
         var fields: [4][]const u8 = .{ &.{}, &.{}, &.{}, &.{} };
         var fi: usize = 0;
         var wr = wd_p;
         while (wr.len > 0 and fi < 4) {
             const fr = try rlp_dec.decodeItem(wr);
-            fields[fi] = switch (fr.item) { .bytes => |bv| bv, .list => &.{} };
+            fields[fi] = switch (fr.item) {
+                .bytes => |bv| bv,
+                .list => &.{},
+            };
             fi += 1;
             wr = wr[fr.consumed..];
         }
         try wds.append(alloc, types.Withdrawal{
-            .index           = toU64(fields[0]),
+            .index = toU64(fields[0]),
             .validator_index = toU64(fields[1]),
-            .address         = toAddr(fields[2]),
-            .amount          = toU64(fields[3]),
+            .address = toAddr(fields[2]),
+            .amount = toU64(fields[3]),
         });
         rest = rest[wd_item.consumed..];
     }
@@ -285,9 +299,9 @@ fn decodeWithdrawals(alloc: std.mem.Allocator, after_hdr: []const u8) ![]types.W
 }
 
 fn buildBlockHashes(alloc: std.mem.Allocator, headers: []const StoredHeader) ![]types.BlockHashEntry {
-    const n     = headers.len;
+    const n = headers.len;
     const start = if (n > 256) n - 256 else 0;
-    const out   = try alloc.alloc(types.BlockHashEntry, n - start);
+    const out = try alloc.alloc(types.BlockHashEntry, n - start);
     for (0..n - start) |i|
         out[i] = .{ .number = headers[start + i].number, .hash = headers[start + i].hash };
     return out;

@@ -4,9 +4,9 @@
 /// Input path:   maps pre-decoded input.Transaction directly to TxInput via mapInputTx().
 ///
 /// ECDSA sender recovery is NOT done here — transition() handles it internally.
-const std        = @import("std");
-const types      = @import("executor_types");
-const input      = @import("input");
+const std = @import("std");
+const types = @import("executor_types");
+const input = @import("input");
 const rlp_decode = @import("rlp_decode");
 
 pub const TxDecodeError = error{
@@ -34,7 +34,7 @@ pub fn decodeTxs(
 /// ECDSA sender recovery is NOT done here — transition() handles it.
 pub fn decodeTxsFromInput(
     alloc: std.mem.Allocator,
-    txs:   []const input.Transaction,
+    txs: []const input.Transaction,
 ) ![]types.TxInput {
     const result = try alloc.alloc(types.TxInput, txs.len);
     for (txs, 0..) |tx, i| {
@@ -45,15 +45,15 @@ pub fn decodeTxsFromInput(
 
 fn mapInputTx(alloc: std.mem.Allocator, tx: input.Transaction) !types.TxInput {
     var out = types.TxInput{
-        .type     = tx.tx_type,
-        .nonce    = tx.nonce,
-        .gas      = tx.gas_limit,
-        .to       = tx.to,
-        .value    = tx.value,
-        .data     = tx.data,
+        .type = tx.tx_type,
+        .nonce = tx.nonce,
+        .gas = tx.gas_limit,
+        .to = tx.to,
+        .value = tx.value,
+        .data = tx.data,
         .chain_id = tx.chain_id,
-        .r        = tx.r,
-        .s        = tx.s,
+        .r = tx.r,
+        .s = tx.s,
     };
 
     switch (tx.tx_type) {
@@ -74,14 +74,14 @@ fn mapInputTx(alloc: std.mem.Allocator, tx: input.Transaction) !types.TxInput {
         1 => {
             // EIP-2930: gas_price is the actual gas price; v is y_parity (0 or 1).
             out.gas_price = tx.gas_price;
-            out.v         = @as(u256, tx.v);
+            out.v = @as(u256, tx.v);
             out.protected = true;
         },
         2, 3, 4 => {
             // EIP-1559/4844/7702: gas_price field holds maxFeePerGas; v is y_parity.
-            out.max_fee_per_gas          = tx.gas_price;
+            out.max_fee_per_gas = tx.gas_price;
             out.max_priority_fee_per_gas = tx.gas_priority_fee;
-            out.v         = @as(u256, tx.v);
+            out.v = @as(u256, tx.v);
             out.protected = true;
         },
         else => return error.InvalidTx,
@@ -92,7 +92,7 @@ fn mapInputTx(alloc: std.mem.Allocator, tx: input.Transaction) !types.TxInput {
         const al = try alloc.alloc(types.AccessListEntry, tx.access_list.len);
         for (tx.access_list, 0..) |entry, j| {
             al[j] = .{
-                .address      = entry.address,
+                .address = entry.address,
                 .storage_keys = entry.storage_keys,
             };
         }
@@ -102,7 +102,7 @@ fn mapInputTx(alloc: std.mem.Allocator, tx: input.Transaction) !types.TxInput {
     // EIP-4844 blob versioned hashes.
     if (tx.blob_hashes.len > 0) {
         out.blob_versioned_hashes = try alloc.dupe(types.Hash, tx.blob_hashes);
-        out.max_fee_per_blob_gas  = tx.max_fee_per_blob_gas;
+        out.max_fee_per_blob_gas = tx.max_fee_per_blob_gas;
     }
 
     // EIP-7702 authorization list.
@@ -111,12 +111,12 @@ fn mapInputTx(alloc: std.mem.Allocator, tx: input.Transaction) !types.TxInput {
         for (tx.authorization_list, 0..) |item, j| {
             auth[j] = .{
                 .chain_id = item.chain_id,
-                .address  = item.address,
-                .nonce    = item.nonce,
-                .signer   = null, // recovered later in transition()
+                .address = item.address,
+                .nonce = item.nonce,
+                .signer = null, // recovered later in transition()
                 .y_parity = @as(u256, item.v),
-                .r        = item.r,
-                .s        = item.s,
+                .r = item.r,
+                .s = item.s,
             };
         }
         out.authorization_list = auth;
