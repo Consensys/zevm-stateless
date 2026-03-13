@@ -88,7 +88,7 @@ pub fn parseBlockJson(
 pub fn parseWitnessJson(
     allocator: std.mem.Allocator,
     json_str: []const u8,
-) !input.StateWitness {
+) !input.ExecutionWitness {
     const parsed = try std.json.parseFromSlice(
         WitnessJson,
         allocator,
@@ -104,9 +104,9 @@ pub fn parseWitnessJson(
         .headers = parsed.value.headers orelse return error.MissingField,
     };
 
-    return input.StateWitness{
+    return input.ExecutionWitness{
         .state_root = @splat(0), // filled in by the caller from ParsedBlock
-        .nodes = try hexSliceArray(allocator, fields.state),
+        .state = try hexSliceArray(allocator, fields.state),
         .codes = try hexSliceArray(allocator, fields.codes),
         .keys = try hexSliceArray(allocator, fields.keys),
         .headers = try hexSliceArray(allocator, fields.headers),

@@ -1,7 +1,7 @@
 //! WitnessDatabase: a zevm database backend backed by a state witness.
 //!
 //! Every account and storage read is served from the flat MPT node pool
-//! (witness.nodes) which mirrors the debug_executionWitness format.  Nodes
+//! (witness.state) which mirrors the debug_executionWitness format.  Nodes
 //! are located by keccak256 hash at each step of the trie traversal.
 //!
 //! Contract bytecodes are served from witness.codes by the same hash-scan.
@@ -28,7 +28,7 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
     0x01, 0x62, 0x2f, 0xb5, 0xe3, 0x63, 0xb4, 0x21,
 };
 
-/// Stateless database built from a proven StateWitness.
+/// Stateless database built from a proven ExecutionWitness.
 ///
 /// Implements the zevm `Database` interface (duck-typed):
 ///   basic(address)              → ?AccountInfo
@@ -36,11 +36,11 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 ///   storage(address, key)       → StorageValue
 ///   blockHash(number)           → Hash
 pub const WitnessDatabase = struct {
-    witness: input.StateWitness,
+    witness: input.ExecutionWitness,
 
     const Self = @This();
 
-    pub fn init(witness: input.StateWitness) Self {
+    pub fn init(witness: input.ExecutionWitness) Self {
         return .{ .witness = witness };
     }
 
@@ -54,7 +54,7 @@ pub const WitnessDatabase = struct {
         const account_state = mpt.verifyAccount(
             self.witness.state_root,
             address,
-            self.witness.nodes,
+            self.witness.state,
         ) catch return DbError.InvalidWitness;
 
         const as = account_state orelse return null;
@@ -107,7 +107,7 @@ pub const WitnessDatabase = struct {
         const account_state = mpt.verifyAccount(
             self.witness.state_root,
             address,
-            self.witness.nodes,
+            self.witness.state,
         ) catch return DbError.InvalidWitness;
 
         const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
@@ -116,7 +116,7 @@ pub const WitnessDatabase = struct {
         const slot = u256ToHash(index);
 
         // Verify the storage proof using the shared flat node pool.
-        return mpt.verifyStorage(storage_root, slot, self.witness.nodes) catch return DbError.InvalidWitness;
+        return mpt.verifyStorage(storage_root, slot, self.witness.state) catch return DbError.InvalidWitness;
     }
 
     // ── blockHash ───────────────────────────────────────────────────────────

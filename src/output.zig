@@ -1,7 +1,9 @@
-//! ProofOutput: the values the verifier checks after block execution.
+//! Output types for stateless block execution.
 //!
-//! The guest commits to these; the on-chain verifier checks them against
-//! the block header stored in the chain.
+//! StatelessValidationResult is the top-level result committed by the guest,
+//! mirroring StatelessValidationResult from the stateless guest spec.
+//!
+//! ProofOutput is the internal per-block detail returned by executeBlock.
 
 const primitives = @import("primitives");
 
@@ -15,7 +17,27 @@ pub const ReceiptData = struct {
     logs_bloom: [256]u8,
 };
 
-/// Output committed by the guest program.
+/// Top-level result of stateless validation.
+/// Mirrors StatelessValidationResult from the stateless guest spec.
+/// Serialized by serializeStatelessOutput (io.zig) as the guest's public output.
+pub const StatelessValidationResult = struct {
+    /// Block hash — keccak256 of the block header RLP.
+    /// Binds this result to a specific input payload
+    /// (spec: new_payload_request_root via SSZ hash tree root; we use block hash).
+    new_payload_request_root: [32]u8,
+    /// Whether execution completed without error.
+    successful_validation: bool,
+    /// Pre-execution state root (trust anchor from parent header).
+    pre_state_root: [32]u8,
+    /// Post-execution state root.
+    post_state_root: [32]u8,
+    /// Receipts root derived from the executed transactions.
+    receipts_root: [32]u8,
+    /// Chain ID from the input ChainConfig.
+    chain_id: u64,
+};
+
+/// Internal per-block execution detail returned by executeBlock.
 pub const ProofOutput = struct {
     /// Pre-execution state root (must match the block's parentHash state).
     pre_state_root: primitives.Hash,

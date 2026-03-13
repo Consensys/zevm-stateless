@@ -1,7 +1,7 @@
 //! Integration tests for WitnessDatabase.
 //!
 //! Proof vectors are built synthetically using the same RLP construction
-//! helpers as the MPT tests.  Each test wires up a minimal StateWitness
+//! helpers as the MPT tests.  Each test wires up a minimal ExecutionWitness
 //! (flat node pool), initialises a WitnessDatabase and then exercises one
 //! interface method.
 
@@ -151,9 +151,9 @@ test "basic returns verified AccountInfo" {
     const leaf_bytes = leaf_node[0..leaf_len];
     const state_root = mpt.keccak256(leaf_bytes);
 
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = state_root,
-        .nodes = &[_][]const u8{leaf_bytes},
+        .state = &[_][]const u8{leaf_bytes},
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
@@ -176,9 +176,9 @@ test "basic returns null for valid non-inclusion proof (empty trie)" {
     const branch_len = buildEmptyBranchNode(&branch);
     const state_root = mpt.keccak256(branch[0..branch_len]);
 
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = state_root,
-        .nodes = &[_][]const u8{branch[0..branch_len]},
+        .state = &[_][]const u8{branch[0..branch_len]},
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
@@ -207,9 +207,9 @@ test "basic returns null when queried address differs from trie leaf" {
     const leaf_bytes = leaf_node[0..leaf_len];
     const state_root = mpt.keccak256(leaf_bytes);
 
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = state_root,
-        .nodes = &[_][]const u8{leaf_bytes},
+        .state = &[_][]const u8{leaf_bytes},
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
@@ -222,9 +222,9 @@ test "basic returns null when queried address differs from trie leaf" {
 // ─── Test 4: codeByHash — KECCAK_EMPTY fast path ──────────────────────────────
 
 test "codeByHash(KECCAK_EMPTY) returns empty Bytecode" {
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = [_]u8{0} ** 32,
-        .nodes = &.{},
+        .state = &.{},
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
@@ -240,9 +240,9 @@ test "codeByHash returns contract bytecode from witness.codes" {
     const contract_code = &[_]u8{ 0x60, 0x00, 0x56 }; // PUSH1 0x00 JUMP
     const code_hash = mpt.keccak256(contract_code);
 
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = [_]u8{0} ** 32,
-        .nodes = &.{},
+        .state = &.{},
         .codes = &[_][]const u8{contract_code},
         .keys = &.{},
         .headers = &.{},
@@ -292,9 +292,9 @@ test "storage returns verified slot value" {
     const state_root = mpt.keccak256(acc_leaf_bytes);
 
     // Flat pool contains both leaves.
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = state_root,
-        .nodes = &[_][]const u8{ acc_leaf_bytes, storage_leaf_bytes },
+        .state = &[_][]const u8{ acc_leaf_bytes, storage_leaf_bytes },
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
@@ -322,9 +322,9 @@ test "storage returns 0 for account with empty storage trie" {
     const state_root = mpt.keccak256(leaf_bytes);
 
     // Pool contains only the account leaf; no storage nodes needed.
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = state_root,
-        .nodes = &[_][]const u8{leaf_bytes},
+        .state = &[_][]const u8{leaf_bytes},
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
@@ -337,9 +337,9 @@ test "storage returns 0 for account with empty storage trie" {
 // ─── Test 8: blockHash — returns zero hash ─────────────────────────────────────
 
 test "blockHash returns zero hash (Phase 3 placeholder)" {
-    const w = input.StateWitness{
+    const w = input.ExecutionWitness{
         .state_root = [_]u8{0} ** 32,
-        .nodes = &.{},
+        .state = &.{},
         .codes = &.{},
         .keys = &.{},
         .headers = &.{},
