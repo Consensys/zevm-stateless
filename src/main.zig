@@ -146,7 +146,7 @@ fn run() !void {
                 si.witness.state_root, addr, &node_index,
             )) orelse continue;
 
-            const value = mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index) catch 0;
+            const value = try mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index);
             if (value != 0) {
                 const entry = try pre_alloc.getOrPut(allocator, addr);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
@@ -162,7 +162,7 @@ fn run() !void {
                     si.witness.state_root, addr, &node_index,
                 )) orelse continue;
 
-                const value = mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index) catch 0;
+                const value = try mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index);
                 if (value != 0) {
                     const entry = try pre_alloc.getOrPut(allocator, addr);
                     if (!entry.found_existing) entry.value_ptr.* = .{};

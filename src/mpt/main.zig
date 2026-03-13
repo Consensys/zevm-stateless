@@ -654,45 +654,9 @@ pub fn updateStorageChained(
 // ─── Indexed variants of verifyWitness and chained update functions ────────────
 //
 // These accept a pre-built NodeIndex (hash→node map) produced by buildNodeIndex().
-// All pool lookups become O(1) hashmap lookups instead of O(N·keccak) linear scans.
-// The `extra` accumulator still uses a linear scan but it starts empty and grows
-// slowly (≤ D entries per account, where D is trie depth ≈ 8), so it stays fast.
+// All pool lookups are O(1) hashmap lookups. New intermediate nodes created during
+// updates are inserted into the same index so subsequent lookups remain O(1).
 
-/// Like verifyWitness but uses a pre-built NodeIndex for O(1) node lookups.
-pub fn verifyWitnessIndexed(witness: input.StateWitness, index: *const NodeIndex) MptError!primitives.Hash {
-    var current_addr: ?primitives.Address = null;
-
-    for (witness.keys) |key| {
-        if (key.len == 20) {
-            var addr: primitives.Address = undefined;
-            @memcpy(&addr, key[0..20]);
-            current_addr = addr;
-            _ = try verifyAccountIndexed(witness.state_root, addr, index);
-
-        } else if (key.len == 52) {
-            var addr: primitives.Address = undefined;
-            @memcpy(&addr, key[0..20]);
-            current_addr = addr;
-            var raw_slot: primitives.Hash = undefined;
-            @memcpy(&raw_slot, key[20..52]);
-
-            const account_state = try verifyAccountIndexed(witness.state_root, addr, index);
-            const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
-            _ = try verifyStorageIndexed(storage_root, raw_slot, index);
-
-        } else if (key.len == 32) {
-            if (current_addr) |addr| {
-                var raw_slot: primitives.Hash = undefined;
-                @memcpy(&raw_slot, key[0..32]);
-
-                const account_state = try verifyAccountIndexed(witness.state_root, addr, index);
-                const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
-                _ = try verifyStorageIndexed(storage_root, raw_slot, index);
-            }
-        }
-    }
-    return witness.state_root;
-}
 
 /// Like updateAccountChained but uses a mutable NodeIndex for O(1) lookups.
 /// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
