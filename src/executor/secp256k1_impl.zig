@@ -35,13 +35,21 @@ pub const Secp256k1 = struct {
     pub fn sign(self: Secp256k1, msg: [32]u8, seckey: [32]u8) ?struct { sig: [64]u8, recid: u8 } {
         var rec_sig: c.secp256k1_ecdsa_recoverable_signature = undefined;
         if (c.secp256k1_ecdsa_sign_recoverable(
-            self.ctx, &rec_sig, &msg, &seckey, null, null,
+            self.ctx,
+            &rec_sig,
+            &msg,
+            &seckey,
+            null,
+            null,
         ) == 0) return null;
 
         var sig_bytes: [64]u8 = undefined;
         var recid: c_int = undefined;
         _ = c.secp256k1_ecdsa_recoverable_signature_serialize_compact(
-            self.ctx, &sig_bytes, &recid, &rec_sig,
+            self.ctx,
+            &sig_bytes,
+            &recid,
+            &rec_sig,
         );
         return .{ .sig = sig_bytes, .recid = @intCast(recid) };
     }
@@ -51,7 +59,10 @@ pub const Secp256k1 = struct {
         var recoverable_sig: c.secp256k1_ecdsa_recoverable_signature = undefined;
         const mut_recid: c_int = @intCast(recid);
         if (c.secp256k1_ecdsa_recoverable_signature_parse_compact(
-            self.ctx, &recoverable_sig, &sig, mut_recid,
+            self.ctx,
+            &recoverable_sig,
+            &sig,
+            mut_recid,
         ) == 0) return null;
 
         var pubkey: c.secp256k1_pubkey = undefined;
@@ -60,7 +71,11 @@ pub const Secp256k1 = struct {
         var pubkey_serialized: [65]u8 = undefined;
         var output_len: usize = 65;
         if (c.secp256k1_ec_pubkey_serialize(
-            self.ctx, &pubkey_serialized, &output_len, &pubkey, c.SECP256K1_EC_UNCOMPRESSED,
+            self.ctx,
+            &pubkey_serialized,
+            &output_len,
+            &pubkey,
+            c.SECP256K1_EC_UNCOMPRESSED,
         ) == 0) return null;
 
         var hash: [32]u8 = undefined;

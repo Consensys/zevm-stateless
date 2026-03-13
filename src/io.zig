@@ -8,11 +8,11 @@
 //!
 //! Returned slices point directly into the arena-owned stdin buffer (zero-copy).
 
-const std        = @import("std");
-const input_mod  = @import("input");
+const std = @import("std");
+const input_mod = @import("input");
 const rlp_decode = @import("rlp_decode");
-const json_mod   = @import("json.zig");
-const zkvm_io    = @import("zkvm_io");
+const json_mod = @import("json.zig");
+const zkvm_io = @import("zkvm_io");
 
 /// Deserialize a zevm-zisk binary StatelessInput from stdin.
 ///
@@ -38,26 +38,25 @@ pub fn fromStdin(allocator: std.mem.Allocator) !input_mod.StatelessInput {
     const blk = try json_mod.parseBlockFromRlp(allocator, block_rlp);
 
     // ── ExecutionWitness ──────────────────────────────────────────────────────
-    const nodes   = try readSliceArray(allocator, data, &pos);
-    const codes   = try readSliceArray(allocator, data, &pos);
-    const keys    = try readSliceArray(allocator, data, &pos);
+    const nodes = try readSliceArray(allocator, data, &pos);
+    const codes = try readSliceArray(allocator, data, &pos);
+    const keys = try readSliceArray(allocator, data, &pos);
     const headers = try readSliceArray(allocator, data, &pos);
 
     var witness = input_mod.StateWitness{
         .state_root = @splat(0),
-        .nodes      = nodes,
-        .codes      = codes,
-        .keys       = keys,
-        .headers    = headers,
+        .nodes = nodes,
+        .codes = codes,
+        .keys = keys,
+        .headers = headers,
     };
-    witness.state_root = rlp_decode.findPreStateRoot(witness.headers, blk.header.number)
-                         orelse blk.header.state_root;
+    witness.state_root = rlp_decode.findPreStateRoot(witness.headers, blk.header.number) orelse blk.header.state_root;
 
     return input_mod.StatelessInput{
-        .block        = blk.header,
+        .block = blk.header,
         .transactions = blk.transactions,
-        .witness      = witness,
-        .withdrawals  = blk.withdrawals,
+        .witness = witness,
+        .withdrawals = blk.withdrawals,
     };
 }
 
@@ -77,4 +76,3 @@ fn readSliceArray(allocator: std.mem.Allocator, data: []const u8, pos: *usize) !
     }
     return result;
 }
-

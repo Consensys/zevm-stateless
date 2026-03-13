@@ -22,8 +22,8 @@
 const std = @import("std");
 
 const RunStats = struct {
-    passed:  u64 = 0,
-    failed:  u64 = 0,
+    passed: u64 = 0,
+    failed: u64 = 0,
     skipped: u64 = 0,
 
     fn total(self: RunStats) u64 {
@@ -31,8 +31,8 @@ const RunStats = struct {
     }
 
     fn add(self: *RunStats, other: RunStats) void {
-        self.passed  += other.passed;
-        self.failed  += other.failed;
+        self.passed += other.passed;
+        self.failed += other.failed;
         self.skipped += other.skipped;
     }
 };
@@ -47,21 +47,24 @@ pub fn main() !void {
 
     // ── Parse flags ───────────────────────────────────────────────────────────
 
-    var fork_filter:          ?[]const u8 = null;
-    var state_fixtures:       ?[]const u8 = null;
-    var blockchain_fixtures:  ?[]const u8 = null;
-    var stop_on_fail:         bool = false;
-    var quiet:                bool = false;
+    var fork_filter: ?[]const u8 = null;
+    var state_fixtures: ?[]const u8 = null;
+    var blockchain_fixtures: ?[]const u8 = null;
+    var stop_on_fail: bool = false;
+    var quiet: bool = false;
 
     var i: usize = 1;
     while (i < args.len) : (i += 1) {
         const arg = args[i];
         if (std.mem.eql(u8, arg, "--fork") and i + 1 < args.len) {
-            i += 1; fork_filter = args[i];
+            i += 1;
+            fork_filter = args[i];
         } else if (std.mem.eql(u8, arg, "--state-fixtures") and i + 1 < args.len) {
-            i += 1; state_fixtures = args[i];
+            i += 1;
+            state_fixtures = args[i];
         } else if (std.mem.eql(u8, arg, "--blockchain-fixtures") and i + 1 < args.len) {
-            i += 1; blockchain_fixtures = args[i];
+            i += 1;
+            blockchain_fixtures = args[i];
         } else if (std.mem.eql(u8, arg, "-x")) {
             stop_on_fail = true;
         } else if (std.mem.eql(u8, arg, "-q")) {
@@ -79,7 +82,7 @@ pub fn main() !void {
 
     var exe_dir_buf: [std.fs.max_path_bytes]u8 = undefined;
     const exe_path = std.fs.selfExePath(&exe_dir_buf) catch args[0];
-    const exe_dir  = std.fs.path.dirname(exe_path) orelse ".";
+    const exe_dir = std.fs.path.dirname(exe_path) orelse ".";
 
     const state_runner_path = try std.fs.path.join(allocator, &.{ exe_dir, "spec-test-runner" });
     defer allocator.free(state_runner_path);
@@ -94,9 +97,9 @@ pub fn main() !void {
     defer state_argv.deinit(allocator);
     try state_argv.append(allocator, state_runner_path);
     if (state_fixtures) |d| try state_argv.appendSlice(allocator, &.{ "--fixtures", d });
-    if (fork_filter)    |f| try state_argv.appendSlice(allocator, &.{ "--fork",     f });
-    if (quiet)              try state_argv.append(allocator, "-q");
-    if (stop_on_fail)       try state_argv.append(allocator, "-x");
+    if (fork_filter) |f| try state_argv.appendSlice(allocator, &.{ "--fork", f });
+    if (quiet) try state_argv.append(allocator, "-q");
+    if (stop_on_fail) try state_argv.append(allocator, "-x");
 
     const state_stats = runSuite(allocator, state_argv.items, quiet) catch RunStats{};
 
@@ -113,9 +116,9 @@ pub fn main() !void {
     defer bc_argv.deinit(allocator);
     try bc_argv.append(allocator, bc_runner_path);
     if (blockchain_fixtures) |d| try bc_argv.appendSlice(allocator, &.{ "--fixtures", d });
-    if (fork_filter)         |f| try bc_argv.appendSlice(allocator, &.{ "--fork",     f });
-    if (quiet)                   try bc_argv.append(allocator, "-q");
-    if (stop_on_fail)            try bc_argv.append(allocator, "-x");
+    if (fork_filter) |f| try bc_argv.appendSlice(allocator, &.{ "--fork", f });
+    if (quiet) try bc_argv.append(allocator, "-q");
+    if (stop_on_fail) try bc_argv.append(allocator, "-x");
 
     const bc_stats = runSuite(allocator, bc_argv.items, quiet) catch RunStats{};
 
@@ -133,11 +136,10 @@ pub fn main() !void {
     std.debug.print("────────────────────────────────────────────────────────────\n", .{});
     const pct: u64 = if (combined.total() > 0) 100 * combined.passed / combined.total() else 0;
     std.debug.print("  Total:  {}/{} passed  ({}%)\n", .{ combined.passed, combined.total(), pct });
-    if (combined.failed  > 0) std.debug.print("  Failed:   {}\n", .{combined.failed});
+    if (combined.failed > 0) std.debug.print("  Failed:   {}\n", .{combined.failed});
     if (combined.skipped > 0) std.debug.print("  Skipped:  {}\n", .{combined.skipped});
     std.debug.print("════════════════════════════════════════════════════════════\n", .{});
-    std.debug.print("STATS: passed={} failed={} skipped={}\n",
-        .{ combined.passed, combined.failed, combined.skipped });
+    std.debug.print("STATS: passed={} failed={} skipped={}\n", .{ combined.passed, combined.failed, combined.skipped });
 
     if (combined.failed > 0) std.process.exit(1);
 }
@@ -164,18 +166,18 @@ fn runSuite(allocator: std.mem.Allocator, argv: []const []const u8, quiet: bool)
             var tok = std.mem.tokenizeScalar(u8, line["STATS:".len..], ' ');
             while (tok.next()) |kv| {
                 if (std.mem.startsWith(u8, kv, "passed="))
-                    stats.passed  += std.fmt.parseInt(u64, kv["passed=".len..],  10) catch 0
+                    stats.passed += std.fmt.parseInt(u64, kv["passed=".len..], 10) catch 0
                 else if (std.mem.startsWith(u8, kv, "failed="))
-                    stats.failed  += std.fmt.parseInt(u64, kv["failed=".len..],  10) catch 0
+                    stats.failed += std.fmt.parseInt(u64, kv["failed=".len..], 10) catch 0
                 else if (std.mem.startsWith(u8, kv, "skipped="))
                     stats.skipped += std.fmt.parseInt(u64, kv["skipped=".len..], 10) catch 0;
             }
         } else if (!std.mem.startsWith(u8, line, "===") and
-                   !std.mem.startsWith(u8, line, "════") and
-                   !std.mem.startsWith(u8, line, "  Results:") and
-                   !std.mem.startsWith(u8, line, "  Failed:") and
-                   !std.mem.startsWith(u8, line, "  Skipped:") and
-                   line.len > 0)
+            !std.mem.startsWith(u8, line, "════") and
+            !std.mem.startsWith(u8, line, "  Results:") and
+            !std.mem.startsWith(u8, line, "  Failed:") and
+            !std.mem.startsWith(u8, line, "  Skipped:") and
+            line.len > 0)
         {
             if (!quiet or std.mem.startsWith(u8, line, "FAIL") or std.mem.startsWith(u8, line, "CRASH"))
                 std.debug.print("{s}\n", .{line});
@@ -194,7 +196,7 @@ fn printSummary(label: []const u8, stats: RunStats) void {
 fn printSuiteLine(label: []const u8, stats: RunStats) void {
     const pct: u64 = if (stats.total() > 0) 100 * stats.passed / stats.total() else 0;
     std.debug.print("  {s}  {}/{} ({}%)", .{ label, stats.passed, stats.total(), pct });
-    if (stats.failed  > 0) std.debug.print("  ✗ {} failed",  .{stats.failed});
+    if (stats.failed > 0) std.debug.print("  ✗ {} failed", .{stats.failed});
     if (stats.skipped > 0) std.debug.print("  ~ {} skipped", .{stats.skipped});
     std.debug.print("\n", .{});
 }

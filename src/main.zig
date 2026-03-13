@@ -1,15 +1,15 @@
 const std = @import("std");
 
-const io          = @import("io.zig");
-const json        = @import("json.zig");
-const rlp_decode  = @import("rlp_decode");
-const input       = @import("input");
-const primitives  = @import("primitives");
-const mpt         = @import("mpt");
-const db          = @import("db");
-const executor    = @import("executor");
-const alloc_mod   = @import("main_allocator");
-const zkvm_io     = @import("zkvm_io");
+const io = @import("io.zig");
+const json = @import("json.zig");
+const rlp_decode = @import("rlp_decode");
+const input = @import("input");
+const primitives = @import("primitives");
+const mpt = @import("mpt");
+const db = @import("db");
+const executor = @import("executor");
+const alloc_mod = @import("main_allocator");
+const zkvm_io = @import("zkvm_io");
 
 pub fn main() void {
     run() catch |err| {
@@ -47,7 +47,7 @@ fn run() !void {
             std.process.exit(1);
         };
     } else blk: {
-        const block_path   = file_paths.items[0];
+        const block_path = file_paths.items[0];
         const witness_path = if (file_paths.items.len > 1) file_paths.items[1] else "examples/witness.json";
 
         const block_json = std.fs.cwd().readFileAlloc(allocator, block_path, 1 << 20) catch |err| {
@@ -79,13 +79,12 @@ fn run() !void {
         // Use the parent block's state root as the proof anchor.
         // The witness proves the PRE-execution state; parsed_block.header.state_root is the
         // POST-execution state root and must not be used here.
-        wit.state_root = rlp_decode.findPreStateRoot(wit.headers, parsed_block.header.number)
-                         orelse parsed_block.header.state_root;
+        wit.state_root = rlp_decode.findPreStateRoot(wit.headers, parsed_block.header.number) orelse parsed_block.header.state_root;
 
         break :blk input.StatelessInput{
-            .block        = parsed_block.header,
+            .block = parsed_block.header,
             .transactions = parsed_block.transactions,
-            .witness      = wit,
+            .witness = wit,
         };
     };
 
@@ -107,7 +106,6 @@ fn run() !void {
                     std.debug.print("  [{d:>4}] FAIL account 0x{x} → {}\n", .{ i, addr, e });
                     phase1_ok = false;
                 };
-
             } else if (key.len == 52) {
                 var addr: primitives.Address = undefined;
                 @memcpy(&addr, key[0..20]);
@@ -126,7 +124,6 @@ fn run() !void {
                         phase1_ok = false;
                     };
                 }
-
             } else if (key.len == 32) {
                 var slot: primitives.Hash = undefined;
                 @memcpy(&slot, key[0..32]);
@@ -151,7 +148,7 @@ fn run() !void {
     }
     std.debug.print(
         "  OK     root = 0x{x}\n" ++
-        "         {d} node(s), {d} code(s), {d} key(s), {d} header(s)\n\n",
+            "         {d} node(s), {d} code(s), {d} key(s), {d} header(s)\n\n",
         .{ si.witness.state_root, si.witness.nodes.len, si.witness.codes.len, si.witness.keys.len, si.witness.headers.len },
     );
 
@@ -179,15 +176,14 @@ fn run() !void {
         const block_env = executor.blockEnvFromHeader(si.block);
 
         std.debug.print("  block env\n", .{});
-        std.debug.print("    number      = {d}\n",   .{block_env.number});
+        std.debug.print("    number      = {d}\n", .{block_env.number});
         std.debug.print("    coinbase    = 0x{x}\n", .{block_env.beneficiary});
-        std.debug.print("    timestamp   = {d}\n",   .{block_env.timestamp});
-        std.debug.print("    gas_limit   = {d}\n",   .{block_env.gas_limit});
-        std.debug.print("    basefee     = {d}\n",   .{block_env.basefee});
+        std.debug.print("    timestamp   = {d}\n", .{block_env.timestamp});
+        std.debug.print("    gas_limit   = {d}\n", .{block_env.gas_limit});
+        std.debug.print("    basefee     = {d}\n", .{block_env.basefee});
         std.debug.print("    prevrandao  = 0x{x}\n", .{block_env.prevrandao orelse [_]u8{0} ** 32});
         if (block_env.blob_excess_gas_and_price) |b| {
-            std.debug.print("    excess_blob_gas = {d}  blob_gasprice = {d}\n",
-                .{ b.excess_blob_gas, b.blob_gasprice });
+            std.debug.print("    excess_blob_gas = {d}  blob_gasprice = {d}\n", .{ b.excess_blob_gas, b.blob_gasprice });
         }
 
         std.debug.print("  transactions  = {d}\n", .{si.transactions.len});
@@ -198,25 +194,25 @@ fn run() !void {
             std.process.exit(1);
         };
 
-        std.debug.print("  fork            = {s}\n",   .{proof_out.fork_name});
-        std.debug.print("  receipts        = {d}\n",   .{proof_out.receipts.len});
+        std.debug.print("  fork            = {s}\n", .{proof_out.fork_name});
+        std.debug.print("  receipts        = {d}\n", .{proof_out.receipts.len});
         std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
 
-        const state_ok    = std.mem.eql(u8, &proof_out.post_state_root, &si.block.state_root);
-        const receipts_ok = std.mem.eql(u8, &proof_out.receipts_root,   &si.block.receipts_root);
+        const state_ok = std.mem.eql(u8, &proof_out.post_state_root, &si.block.state_root);
+        const receipts_ok = std.mem.eql(u8, &proof_out.receipts_root, &si.block.receipts_root);
 
         if (state_ok) {
             std.debug.print("  post_state_root = 0x{x}  ✓\n", .{proof_out.post_state_root});
         } else {
             std.debug.print("  post_state_root = 0x{x}  ✗  MISMATCH\n", .{proof_out.post_state_root});
-            std.debug.print("  expected        = 0x{x}\n",               .{si.block.state_root});
+            std.debug.print("  expected        = 0x{x}\n", .{si.block.state_root});
         }
 
         if (receipts_ok) {
             std.debug.print("  receipts_root   = 0x{x}  ✓\n", .{proof_out.receipts_root});
         } else {
             std.debug.print("  receipts_root   = 0x{x}  ✗  MISMATCH\n", .{proof_out.receipts_root});
-            std.debug.print("  expected        = 0x{x}\n",               .{si.block.receipts_root});
+            std.debug.print("  expected        = 0x{x}\n", .{si.block.receipts_root});
         }
 
         if (!state_ok or !receipts_ok) {
@@ -226,11 +222,12 @@ fn run() !void {
 
         // Emit a machine-readable JSON result line to stdout.
         var out_buf: [512]u8 = undefined;
-        const out = try std.fmt.bufPrint(&out_buf,
+        const out = try std.fmt.bufPrint(
+            &out_buf,
             "{{\"block\":{d},\"valid\":true," ++
-            "\"pre_state_root\":\"0x{x}\"," ++
-            "\"post_state_root\":\"0x{x}\"," ++
-            "\"receipts_root\":\"0x{x}\"}}\n",
+                "\"pre_state_root\":\"0x{x}\"," ++
+                "\"post_state_root\":\"0x{x}\"," ++
+                "\"receipts_root\":\"0x{x}\"}}\n",
             .{
                 si.block.number,
                 proof_out.pre_state_root,

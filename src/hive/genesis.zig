@@ -1,12 +1,12 @@
 /// Parse /genesis.json (geth format) → AllocMap + computed genesis block hash.
 const std = @import("std");
 const primitives = @import("primitives");
-const types      = @import("executor_types");
-const rlp        = @import("executor_rlp_encode");
-const output     = @import("executor_output");
+const types = @import("executor_types");
+const rlp = @import("executor_rlp_encode");
+const output = @import("executor_output");
 
 pub const Address = types.Address;
-pub const Hash    = types.Hash;
+pub const Hash = types.Hash;
 pub const AllocMap = std.AutoHashMapUnmanaged(Address, types.AllocAccount);
 
 // keccak256(RLP([])) — the "empty uncle" hash
@@ -26,37 +26,37 @@ const EMPTY_TRIE_HASH: Hash = .{
 };
 
 pub const GenesisResult = struct {
-    alloc:     AllocMap,
-    hash:      Hash,
+    alloc: AllocMap,
+    hash: Hash,
     timestamp: u64,
-    coinbase:  Address,
+    coinbase: Address,
 };
 
 /// All fields needed to RLP-encode a block header and compute its hash.
 /// Used by both genesis and chain (for imported blocks).
 pub const HeaderFields = struct {
-    parent_hash:   Hash,
-    uncle_hash:    Hash,
-    coinbase:      Address,
-    state_root:    Hash,
-    txs_root:      Hash,
+    parent_hash: Hash,
+    uncle_hash: Hash,
+    coinbase: Address,
+    state_root: Hash,
+    txs_root: Hash,
     receipts_root: Hash,
-    logs_bloom:    [256]u8,
-    difficulty:    u256,
-    number:        u64,
-    gas_limit:     u64,
-    gas_used:      u64,
-    timestamp:     u64,
-    extra_data:    []const u8,
-    mix_hash:      Hash,
-    nonce:         [8]u8,
+    logs_bloom: [256]u8,
+    difficulty: u256,
+    number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    mix_hash: Hash,
+    nonce: [8]u8,
     // optional post-London fields
-    base_fee:                 ?u256 = null,
-    withdrawals_root:         ?Hash = null,
-    blob_gas_used:            ?u64  = null,
-    excess_blob_gas:          ?u64  = null,
+    base_fee: ?u256 = null,
+    withdrawals_root: ?Hash = null,
+    blob_gas_used: ?u64 = null,
+    excess_blob_gas: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
-    requests_hash:            ?Hash = null,
+    requests_hash: ?Hash = null,
 };
 
 /// Encode header fields as an RLP list and return keccak256 of the encoding.
@@ -95,27 +95,29 @@ pub fn computeBlockHash(arena: std.mem.Allocator, h: HeaderFields) !Hash {
 
 /// Parse /genesis.json, compute stateRoot and genesis block hash.
 pub fn parse(
-    arena:    std.mem.Allocator,
+    arena: std.mem.Allocator,
     json_text: []const u8,
-    spec:     primitives.SpecId,
+    spec: primitives.SpecId,
 ) !GenesisResult {
     const parsed = try std.json.parseFromSlice(
-        std.json.Value, arena, json_text,
+        std.json.Value,
+        arena,
+        json_text,
         .{ .duplicate_field_behavior = .use_last },
     );
     const root = switch (parsed.value) {
         .object => |o| o,
-        else    => return error.InvalidGenesis,
+        else => return error.InvalidGenesis,
     };
 
     // ── Header fields ─────────────────────────────────────────────────────────
-    const timestamp  = jsonU64(root.get("timestamp")  orelse .{ .integer = 0 }) catch 0;
-    const gas_limit  = jsonU64(root.get("gasLimit")   orelse .{ .integer = 0x1388 }) catch 0x1388;
+    const timestamp = jsonU64(root.get("timestamp") orelse .{ .integer = 0 }) catch 0;
+    const gas_limit = jsonU64(root.get("gasLimit") orelse .{ .integer = 0x1388 }) catch 0x1388;
     const difficulty = jsonU256(root.get("difficulty") orelse .{ .integer = 0 }) catch 0;
-    const coinbase   = hexToAddr(strVal(root, "coinbase") orelse
+    const coinbase = hexToAddr(strVal(root, "coinbase") orelse
         "0x0000000000000000000000000000000000000000") catch [_]u8{0} ** 20;
     const extra_data = hexToSlice(arena, strVal(root, "extraData") orelse "0x") catch &.{};
-    const mix_hash   = hexToHash(strVal(root, "mixHash") orelse
+    const mix_hash = hexToHash(strVal(root, "mixHash") orelse
         "0x0000000000000000000000000000000000000000000000000000000000000000") catch [_]u8{0} ** 32;
 
     // nonce: always 8 bytes big-endian
@@ -131,25 +133,36 @@ pub fn parse(
     // Shanghai+: withdrawalsRoot
     const withdrawals_root: ?Hash = if (primitives.isEnabledIn(spec, .shanghai)) blk: {
         const v = root.get("withdrawalsRoot") orelse break :blk EMPTY_TRIE_HASH;
-        break :blk hexToHash(switch (v) { .string => |s| s, else => break :blk EMPTY_TRIE_HASH }) catch EMPTY_TRIE_HASH;
+        break :blk hexToHash(switch (v) {
+            .string => |s| s,
+            else => break :blk EMPTY_TRIE_HASH,
+        }) catch EMPTY_TRIE_HASH;
     } else null;
 
     // Cancun+: blobGasUsed, excessBlobGas, parentBeaconBlockRoot
     const blob_gas_used: ?u64 = if (primitives.isEnabledIn(spec, .cancun))
         jsonU64(root.get("blobGasUsed") orelse .{ .integer = 0 }) catch 0
-    else null;
+    else
+        null;
     const excess_blob_gas: ?u64 = if (primitives.isEnabledIn(spec, .cancun))
         jsonU64(root.get("excessBlobGas") orelse .{ .integer = 0 }) catch 0
-    else null;
+    else
+        null;
     const parent_beacon_block_root: ?Hash = if (primitives.isEnabledIn(spec, .cancun)) blk: {
         const v = root.get("parentBeaconBlockRoot") orelse break :blk [_]u8{0} ** 32;
-        break :blk hexToHash(switch (v) { .string => |s| s, else => break :blk [_]u8{0} ** 32 }) catch [_]u8{0} ** 32;
+        break :blk hexToHash(switch (v) {
+            .string => |s| s,
+            else => break :blk [_]u8{0} ** 32,
+        }) catch [_]u8{0} ** 32;
     } else null;
 
     // Prague+: requestsHash
     const requests_hash: ?Hash = if (primitives.isEnabledIn(spec, .prague)) blk: {
         const v = root.get("requestsHash") orelse break :blk null;
-        break :blk hexToHash(switch (v) { .string => |s| s, else => break :blk null }) catch null;
+        break :blk hexToHash(switch (v) {
+            .string => |s| s,
+            else => break :blk null,
+        }) catch null;
     } else null;
 
     // ── Parse alloc ───────────────────────────────────────────────────────────
@@ -163,34 +176,34 @@ pub fn parse(
 
     // ── Compute genesis block hash ────────────────────────────────────────────
     const genesis_hash = try computeBlockHash(arena, .{
-        .parent_hash   = [_]u8{0} ** 32,
-        .uncle_hash    = EMPTY_UNCLE_HASH,
-        .coinbase      = coinbase,
-        .state_root    = state_root,
-        .txs_root      = EMPTY_TRIE_HASH,
+        .parent_hash = [_]u8{0} ** 32,
+        .uncle_hash = EMPTY_UNCLE_HASH,
+        .coinbase = coinbase,
+        .state_root = state_root,
+        .txs_root = EMPTY_TRIE_HASH,
         .receipts_root = EMPTY_TRIE_HASH,
-        .logs_bloom    = [_]u8{0} ** 256,
-        .difficulty    = difficulty,
-        .number        = 0,
-        .gas_limit     = gas_limit,
-        .gas_used      = 0,
-        .timestamp     = timestamp,
-        .extra_data    = extra_data,
-        .mix_hash      = mix_hash,
-        .nonce         = nonce_bytes,
-        .base_fee                 = base_fee,
-        .withdrawals_root         = withdrawals_root,
-        .blob_gas_used            = blob_gas_used,
-        .excess_blob_gas          = excess_blob_gas,
+        .logs_bloom = [_]u8{0} ** 256,
+        .difficulty = difficulty,
+        .number = 0,
+        .gas_limit = gas_limit,
+        .gas_used = 0,
+        .timestamp = timestamp,
+        .extra_data = extra_data,
+        .mix_hash = mix_hash,
+        .nonce = nonce_bytes,
+        .base_fee = base_fee,
+        .withdrawals_root = withdrawals_root,
+        .blob_gas_used = blob_gas_used,
+        .excess_blob_gas = excess_blob_gas,
         .parent_beacon_block_root = parent_beacon_block_root,
-        .requests_hash            = requests_hash,
+        .requests_hash = requests_hash,
     });
 
     return GenesisResult{
-        .alloc     = alloc_map,
-        .hash      = genesis_hash,
+        .alloc = alloc_map,
+        .hash = genesis_hash,
         .timestamp = timestamp,
-        .coinbase  = coinbase,
+        .coinbase = coinbase,
     };
 }
 
@@ -200,28 +213,31 @@ fn parseAlloc(arena: std.mem.Allocator, val: std.json.Value) !AllocMap {
     var map = AllocMap{};
     const obj = switch (val) {
         .object => |o| o,
-        else    => return map,
+        else => return map,
     };
     var it = obj.iterator();
     while (it.next()) |entry| {
         const addr = hexToAddr(entry.key_ptr.*) catch continue;
         const acct_obj = switch (entry.value_ptr.*) {
             .object => |o| o,
-            else    => continue,
+            else => continue,
         };
         var acct = types.AllocAccount{};
         if (acct_obj.get("balance")) |v| acct.balance = jsonU256(v) catch 0;
-        if (acct_obj.get("nonce"))   |v| acct.nonce   = jsonU64(v)  catch 0;
-        if (acct_obj.get("code"))    |v| {
-            const s = switch (v) { .string => |s| s, else => "" };
+        if (acct_obj.get("nonce")) |v| acct.nonce = jsonU64(v) catch 0;
+        if (acct_obj.get("code")) |v| {
+            const s = switch (v) {
+                .string => |s| s,
+                else => "",
+            };
             acct.code = hexToSlice(arena, s) catch &.{};
         }
         if (acct_obj.get("storage")) |sv| {
             if (sv == .object) {
                 var sit = sv.object.iterator();
                 while (sit.next()) |skv| {
-                    const key  = hexToU256(skv.key_ptr.*)    catch continue;
-                    const sval = jsonU256(skv.value_ptr.*)   catch continue;
+                    const key = hexToU256(skv.key_ptr.*) catch continue;
+                    const sval = jsonU256(skv.value_ptr.*) catch continue;
                     if (sval != 0) try acct.storage.put(arena, key, sval);
                 }
             }
@@ -235,7 +251,10 @@ fn parseAlloc(arena: std.mem.Allocator, val: std.json.Value) !AllocMap {
 
 fn strVal(obj: std.json.ObjectMap, key: []const u8) ?[]const u8 {
     const v = obj.get(key) orelse return null;
-    return switch (v) { .string => |s| s, else => null };
+    return switch (v) {
+        .string => |s| s,
+        else => null,
+    };
 }
 
 fn stripHex(s: []const u8) []const u8 {
@@ -281,17 +300,17 @@ fn hexToU256(hex: []const u8) !u256 {
 fn jsonU64(v: std.json.Value) !u64 {
     return switch (v) {
         .integer => |n| @intCast(n),
-        .string  => |s| std.fmt.parseInt(u64, stripHex(s), 16) catch
-                        std.fmt.parseInt(u64, s, 10),
-        else     => error.InvalidNumeric,
+        .string => |s| std.fmt.parseInt(u64, stripHex(s), 16) catch
+            std.fmt.parseInt(u64, s, 10),
+        else => error.InvalidNumeric,
     };
 }
 
 fn jsonU256(v: std.json.Value) !u256 {
     return switch (v) {
         .integer => |n| @intCast(n),
-        .string  => |s| std.fmt.parseInt(u256, stripHex(s), 16) catch
-                        std.fmt.parseInt(u256, s, 10),
-        else     => error.InvalidNumeric,
+        .string => |s| std.fmt.parseInt(u256, stripHex(s), 16) catch
+            std.fmt.parseInt(u256, s, 10),
+        else => error.InvalidNumeric,
     };
 }

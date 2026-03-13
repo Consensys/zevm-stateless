@@ -8,8 +8,25 @@ pub fn build(b: *std.Build) void {
     const is_linux = b.graph.host.result.os.tag == .linux;
     const crypto_prefix = if (is_linux) "/usr/local" else "/opt/homebrew";
     const crypto_include = b.fmt("{s}/include", .{crypto_prefix});
-    const libblst_path   = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
-    const libmcl_path    = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+    const libblst_path = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
+    const libmcl_path = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
+
+    // mcl is built with g++ on Linux, which embeds libstdc++ symbol references
+    // into the .a archive. Zig's LLD cannot resolve these against the system
+    // libstdc++ reliably. The .so avoids the problem: its C++ deps are resolved
+    // at load time by the OS dynamic linker. On macOS, Homebrew mcl is compiled
+    // with clang/libc++ so static linking with linkLibCpp() works correctly.
+    const addMcl = struct {
+        fn call(step: *std.Build.Step.Compile, linux: bool, mcl_path: []const u8) void {
+            if (linux) {
+                step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                step.linkSystemLibrary("mcl");
+            } else {
+                step.addObjectFile(.{ .cwd_relative = mcl_path });
+                step.linkLibCpp();
+            }
+        }
+    }.call;
 
     // zevm dependency
     const zevm_dep = b.dependency("zevm", .{
@@ -74,9 +91,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    rlp_decode_mod.addImport("input",      input_mod);
+    rlp_decode_mod.addImport("input", input_mod);
     rlp_decode_mod.addImport("primitives", primitives);
-    rlp_decode_mod.addImport("mpt",        mpt_mod);
+    rlp_decode_mod.addImport("mpt", mpt_mod);
 
     const db_mod = b.addModule("db", .{
         .root_source_file = b.path("src/db/main.zig"),
@@ -136,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main_allocator.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // zkvm_io — injectable I/O module for the zevm_stateless binary.
@@ -160,23 +178,23 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
-    exe.root_module.addImport("primitives",     primitives);
-    exe.root_module.addImport("bytecode",       bytecode);
-    exe.root_module.addImport("state",          state);
-    exe.root_module.addImport("database",       database);
-    exe.root_module.addImport("context",        context);
-    exe.root_module.addImport("interpreter",    interpreter);
-    exe.root_module.addImport("precompile",     precompile);
-    exe.root_module.addImport("handler",        handler);
-    exe.root_module.addImport("inspector",      inspector);
-    exe.root_module.addImport("input",          input_mod);
-    exe.root_module.addImport("output",         output_mod);
-    exe.root_module.addImport("mpt",            mpt_mod);
-    exe.root_module.addImport("db",             db_mod);
-    exe.root_module.addImport("executor",       executor_mod);
-    exe.root_module.addImport("rlp_decode",     rlp_decode_mod);
+    exe.root_module.addImport("primitives", primitives);
+    exe.root_module.addImport("bytecode", bytecode);
+    exe.root_module.addImport("state", state);
+    exe.root_module.addImport("database", database);
+    exe.root_module.addImport("context", context);
+    exe.root_module.addImport("interpreter", interpreter);
+    exe.root_module.addImport("precompile", precompile);
+    exe.root_module.addImport("handler", handler);
+    exe.root_module.addImport("inspector", inspector);
+    exe.root_module.addImport("input", input_mod);
+    exe.root_module.addImport("output", output_mod);
+    exe.root_module.addImport("mpt", mpt_mod);
+    exe.root_module.addImport("db", db_mod);
+    exe.root_module.addImport("executor", executor_mod);
+    exe.root_module.addImport("rlp_decode", rlp_decode_mod);
     exe.root_module.addImport("main_allocator", main_allocator_mod);
-    exe.root_module.addImport("zkvm_io",        zkvm_io_mod);
+    exe.root_module.addImport("zkvm_io", zkvm_io_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
     exe.addIncludePath(.{ .cwd_relative = crypto_include });
@@ -186,8 +204,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("c");
     exe.linkSystemLibrary("m");
     exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    exe.linkLibCpp();
+    addMcl(exe, is_linux, libmcl_path);
 
     b.installArtifact(exe);
 
@@ -215,7 +232,7 @@ pub fn build(b: *std.Build) void {
             .optimize = optimize,
             .imports = &.{
                 .{ .name = "primitives", .module = primitives },
-                .{ .name = "mpt",        .module = mpt_mod    },
+                .{ .name = "mpt", .module = mpt_mod },
             },
         }),
     });
@@ -226,8 +243,10 @@ pub fn build(b: *std.Build) void {
     gen_example_step.dependOn(&run_gen_example.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
+    mod_tests.linkLibC();
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    exe_tests.linkLibC();
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     // MPT integration tests in src/mpt/test.zig
@@ -240,6 +259,7 @@ pub fn build(b: *std.Build) void {
     mpt_test_mod.addImport("mpt", mpt_mod);
     mpt_test_mod.addImport("input", input_mod);
     const mpt_tests = b.addTest(.{ .root_module = mpt_test_mod });
+    mpt_tests.linkLibC();
     const run_mpt_tests = b.addRunArtifact(mpt_tests);
 
     // WitnessDatabase integration tests in src/db/test.zig
@@ -255,6 +275,7 @@ pub fn build(b: *std.Build) void {
     db_test_mod.addImport("input", input_mod);
     db_test_mod.addImport("db", db_mod);
     const db_tests = b.addTest(.{ .root_module = db_test_mod });
+    db_tests.linkLibC();
     const run_db_tests = b.addRunArtifact(db_tests);
 
     const test_step = b.step("test", "Run tests");
@@ -286,6 +307,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/executor/executor_allocator.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // executor_types — canonical EVM type definitions; no external deps
@@ -308,15 +330,15 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    native_executor_transition_mod.addImport("executor_types",      executor_types_mod);
+    native_executor_transition_mod.addImport("executor_types", executor_types_mod);
     native_executor_transition_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
-    native_executor_transition_mod.addImport("primitives",          primitives);
-    native_executor_transition_mod.addImport("state",               state);
-    native_executor_transition_mod.addImport("bytecode",            bytecode);
-    native_executor_transition_mod.addImport("database",            database);
-    native_executor_transition_mod.addImport("context",             context);
-    native_executor_transition_mod.addImport("handler",             handler);
-    native_executor_transition_mod.addImport("precompile",          precompile);
+    native_executor_transition_mod.addImport("primitives", primitives);
+    native_executor_transition_mod.addImport("state", state);
+    native_executor_transition_mod.addImport("bytecode", bytecode);
+    native_executor_transition_mod.addImport("database", database);
+    native_executor_transition_mod.addImport("context", context);
+    native_executor_transition_mod.addImport("handler", handler);
+    native_executor_transition_mod.addImport("precompile", precompile);
     // secp256k1_wrapper — default: standalone C wrapper for native tx signing.
     // Independent of zevm's precompile module graph to avoid file-ownership
     // conflicts.  Override in zkVM builds with an accelerated implementation:
@@ -326,8 +348,8 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    native_executor_transition_mod.addImport("secp256k1_wrapper",   secp256k1_impl_mod);
-    native_executor_transition_mod.addImport("executor_allocator",  executor_allocator_mod);
+    native_executor_transition_mod.addImport("secp256k1_wrapper", secp256k1_impl_mod);
+    native_executor_transition_mod.addImport("executor_allocator", executor_allocator_mod);
 
     // native_executor_output — trie computations; uses executor_transition for type consistency
     const native_executor_output_mod = b.createModule(.{
@@ -335,10 +357,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    native_executor_output_mod.addImport("executor_types",       executor_types_mod);
-    native_executor_output_mod.addImport("executor_rlp_encode",  executor_rlp_encode_mod);
-    native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
-    native_executor_output_mod.addImport("mpt",                  mpt_mod);
+    native_executor_output_mod.addImport("executor_types", executor_types_mod);
+    native_executor_output_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
+    native_executor_output_mod.addImport("mpt_builder", mpt_builder_mod);
+    native_executor_output_mod.addImport("mpt", mpt_mod);
 
     // executor_fork — mainnet hardfork schedule (block/timestamp → SpecId + reward)
     const executor_fork_mod = b.createModule(.{
@@ -355,19 +377,19 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     native_executor_tx_decode_mod.addImport("executor_types", executor_types_mod);
-    native_executor_tx_decode_mod.addImport("input",          input_mod);
-    native_executor_tx_decode_mod.addImport("rlp_decode",     rlp_decode_mod);
+    native_executor_tx_decode_mod.addImport("input", input_mod);
+    native_executor_tx_decode_mod.addImport("rlp_decode", rlp_decode_mod);
 
     // Deferred: wire executor_output into transition (output_mod created after transition_mod)
     native_executor_transition_mod.addImport("executor_output", native_executor_output_mod);
 
     // Wire named executor sub-modules into executor_mod (deferred — modules created above)
-    executor_mod.addImport("executor_types",      executor_types_mod);
+    executor_mod.addImport("executor_types", executor_types_mod);
     executor_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
     executor_mod.addImport("executor_transition", native_executor_transition_mod);
-    executor_mod.addImport("executor_output",     native_executor_output_mod);
-    executor_mod.addImport("executor_fork",       executor_fork_mod);
-    executor_mod.addImport("executor_tx_decode",  native_executor_tx_decode_mod);
+    executor_mod.addImport("executor_output", native_executor_output_mod);
+    executor_mod.addImport("executor_fork", executor_fork_mod);
+    executor_mod.addImport("executor_tx_decode", native_executor_tx_decode_mod);
 
     // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
     const t8n_input_mod = b.createModule(.{
@@ -384,17 +406,17 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = primitives               },
-                .{ .name = "state",               .module = state                    },
-                .{ .name = "bytecode",            .module = bytecode                 },
-                .{ .name = "database",            .module = database                 },
-                .{ .name = "context",             .module = context                  },
-                .{ .name = "handler",             .module = handler                  },
-                .{ .name = "precompile",          .module = precompile               },
-                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
-                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "primitives", .module = primitives },
+                .{ .name = "state", .module = state },
+                .{ .name = "bytecode", .module = bytecode },
+                .{ .name = "database", .module = database },
+                .{ .name = "context", .module = context },
+                .{ .name = "handler", .module = handler },
+                .{ .name = "precompile", .module = precompile },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod },
+                .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
             },
         }),
     });
@@ -407,8 +429,7 @@ pub fn build(b: *std.Build) void {
     t8n_exe.linkSystemLibrary("c");
     t8n_exe.linkSystemLibrary("m");
     t8n_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    t8n_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    t8n_exe.linkLibCpp();
+    addMcl(t8n_exe, is_linux, libmcl_path);
 
     b.installArtifact(t8n_exe);
 
@@ -436,18 +457,18 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = primitives               },
-                .{ .name = "state",               .module = state                    },
-                .{ .name = "bytecode",            .module = bytecode                 },
-                .{ .name = "database",            .module = database                 },
-                .{ .name = "context",             .module = context                  },
-                .{ .name = "handler",             .module = handler                  },
-                .{ .name = "precompile",          .module = precompile               },
-                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
-                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "primitives", .module = primitives },
+                .{ .name = "state", .module = state },
+                .{ .name = "bytecode", .module = bytecode },
+                .{ .name = "database", .module = database },
+                .{ .name = "context", .module = context },
+                .{ .name = "handler", .module = handler },
+                .{ .name = "precompile", .module = precompile },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod },
+                .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output",     .module = native_executor_output_mod     },
-                .{ .name = "t8n_input",           .module = t8n_input_mod                  },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
+                .{ .name = "t8n_input", .module = t8n_input_mod },
             },
         }),
     });
@@ -458,8 +479,7 @@ pub fn build(b: *std.Build) void {
     spec_test_exe.linkSystemLibrary("c");
     spec_test_exe.linkSystemLibrary("m");
     spec_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    spec_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    spec_test_exe.linkLibCpp();
+    addMcl(spec_test_exe, is_linux, libmcl_path);
 
     b.installArtifact(spec_test_exe);
 
@@ -485,13 +505,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    blockchain_test_runner_mod.addImport("primitives",           primitives);
-    blockchain_test_runner_mod.addImport("executor_types",       executor_types_mod);
-    blockchain_test_runner_mod.addImport("executor_transition",  native_executor_transition_mod);
-    blockchain_test_runner_mod.addImport("executor_output",      native_executor_output_mod);
-    blockchain_test_runner_mod.addImport("executor_fork",        executor_fork_mod);
-    blockchain_test_runner_mod.addImport("executor_tx_decode",   native_executor_tx_decode_mod);
-    blockchain_test_runner_mod.addImport("mpt",                  mpt_mod);
+    blockchain_test_runner_mod.addImport("primitives", primitives);
+    blockchain_test_runner_mod.addImport("executor_types", executor_types_mod);
+    blockchain_test_runner_mod.addImport("executor_transition", native_executor_transition_mod);
+    blockchain_test_runner_mod.addImport("executor_output", native_executor_output_mod);
+    blockchain_test_runner_mod.addImport("executor_fork", executor_fork_mod);
+    blockchain_test_runner_mod.addImport("executor_tx_decode", native_executor_tx_decode_mod);
+    blockchain_test_runner_mod.addImport("mpt", mpt_mod);
 
     const bc_test_exe = b.addExecutable(.{
         .name = "blockchain-test-runner",
@@ -500,17 +520,17 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = primitives               },
-                .{ .name = "state",               .module = state                    },
-                .{ .name = "bytecode",            .module = bytecode                 },
-                .{ .name = "database",            .module = database                 },
-                .{ .name = "context",             .module = context                  },
-                .{ .name = "handler",             .module = handler                  },
-                .{ .name = "precompile",          .module = precompile               },
-                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
-                .{ .name = "executor_types",      .module = executor_types_mod             },
+                .{ .name = "primitives", .module = primitives },
+                .{ .name = "state", .module = state },
+                .{ .name = "bytecode", .module = bytecode },
+                .{ .name = "database", .module = database },
+                .{ .name = "context", .module = context },
+                .{ .name = "handler", .module = handler },
+                .{ .name = "precompile", .module = precompile },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod },
+                .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
                 .{ .name = "blockchain_test/runner.zig", .module = blockchain_test_runner_mod },
             },
         }),
@@ -522,8 +542,7 @@ pub fn build(b: *std.Build) void {
     bc_test_exe.linkSystemLibrary("c");
     bc_test_exe.linkSystemLibrary("m");
     bc_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    bc_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    bc_test_exe.linkLibCpp();
+    addMcl(bc_test_exe, is_linux, libmcl_path);
 
     b.installArtifact(bc_test_exe);
 
@@ -572,21 +591,21 @@ pub fn build(b: *std.Build) void {
             .target = target,
             .optimize = optimize,
             .imports = &.{
-                .{ .name = "primitives",          .module = primitives               },
-                .{ .name = "state",               .module = state                    },
-                .{ .name = "bytecode",            .module = bytecode                 },
-                .{ .name = "database",            .module = database                 },
-                .{ .name = "context",             .module = context                  },
-                .{ .name = "handler",             .module = handler                  },
-                .{ .name = "precompile",          .module = precompile               },
-                .{ .name = "mpt_builder",         .module = mpt_builder_mod                },
-                .{ .name = "mpt",                 .module = mpt_mod                        },
-                .{ .name = "executor_types",      .module = executor_types_mod             },
-                .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod        },
+                .{ .name = "primitives", .module = primitives },
+                .{ .name = "state", .module = state },
+                .{ .name = "bytecode", .module = bytecode },
+                .{ .name = "database", .module = database },
+                .{ .name = "context", .module = context },
+                .{ .name = "handler", .module = handler },
+                .{ .name = "precompile", .module = precompile },
+                .{ .name = "mpt_builder", .module = mpt_builder_mod },
+                .{ .name = "mpt", .module = mpt_mod },
+                .{ .name = "executor_types", .module = executor_types_mod },
+                .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output",     .module = native_executor_output_mod     },
-                .{ .name = "executor_fork",       .module = executor_fork_mod              },
-                .{ .name = "executor_tx_decode",  .module = native_executor_tx_decode_mod  },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
+                .{ .name = "executor_fork", .module = executor_fork_mod },
+                .{ .name = "executor_tx_decode", .module = native_executor_tx_decode_mod },
             },
         }),
     });
@@ -597,8 +616,7 @@ pub fn build(b: *std.Build) void {
     hive_rlp_exe.linkSystemLibrary("c");
     hive_rlp_exe.linkSystemLibrary("m");
     hive_rlp_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    hive_rlp_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    hive_rlp_exe.linkLibCpp();
+    addMcl(hive_rlp_exe, is_linux, libmcl_path);
 
     b.installArtifact(hive_rlp_exe);
 
@@ -610,12 +628,12 @@ pub fn build(b: *std.Build) void {
     const fetch_cmd = b.addSystemCommand(&.{
         "sh", "-c",
         "rm -rf spec-tests/fixtures && " ++
-        "mkdir -p spec-tests/fixtures && " ++
-        "echo 'Downloading execution-spec-tests v5.4.0 fixtures...' && " ++
-        "curl -fL " ++
-        "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz " ++
-        "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
-        "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
+            "mkdir -p spec-tests/fixtures && " ++
+            "echo 'Downloading execution-spec-tests v5.4.0 fixtures...' && " ++
+            "curl -fL " ++
+            "https://github.com/ethereum/execution-spec-tests/releases/download/v5.4.0/fixtures_develop.tar.gz " ++
+            "| tar xz --strip-components=1 -C spec-tests/fixtures/ && " ++
+            "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     });
     fetch_fixtures_step.dependOn(&fetch_cmd.step);
 }

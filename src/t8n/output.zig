@@ -338,4 +338,3 @@ fn writeJsonString(writer: anytype, s: []const u8) !void {
     }
     try writer.writeAll("\"");
 }
-
