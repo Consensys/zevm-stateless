@@ -8,6 +8,15 @@ const executor = @import("executor");
 const alloc_mod = @import("main_allocator");
 const zkvm_io = @import("zkvm_io");
 
+/// run_stateless_guest — spec entry point: deserialize → validate → serialize.
+/// Mirrors run_stateless_guest from stateless_guest.py in ethereum/execution-specs.
+/// Input and output bytes use the format implemented by the wired `io` module.
+pub fn runStatelessGuest(allocator: std.mem.Allocator, input_bytes: []const u8) ![]const u8 {
+    const si = try io.deserializeStatelessInput(allocator, input_bytes);
+    const result = try executor.verifyStatelessNewPayload(allocator, si);
+    return io.serializeStatelessOutput(allocator, result);
+}
+
 pub fn main() void {
     run() catch |err| {
         std.debug.print("fatal: {}\n", .{err});
@@ -21,10 +30,6 @@ fn run() !void {
     const args = try std.process.argsAlloc(allocator);
 
     // Parse flags and collect positional (file path) arguments.
-    // --fork <name> may appear anywhere; all other args are treated as file paths.
-    // Note: fork override is not exposed in the spec interface; it is applied
-    // internally for dev/testing via executor.verifyStatelessNewPayload's fork_name
-    // parameter. For now native builds ignore --fork here and rely on auto-detection.
     var file_paths = std.ArrayListUnmanaged([]const u8){};
     {
         var arg_i: usize = 1;
@@ -37,15 +42,22 @@ fn run() !void {
         }
     }
 
-    // ── deserialize_stateless_input ───────────────────────────────────────────
-    const si: input.StatelessInput = if (file_paths.items.len == 0) blk: {
-        // No file paths — read binary StatelessInput from stdin.
-        break :blk io.fromStdin(allocator) catch |err| {
-            std.debug.print("error: failed to parse stateless input from stdin: {}\n", .{err});
-            std.debug.print("hint:  pipe a zevm-zisk binary StatelessInput, or pass block/witness paths as args\n", .{});
+    // ── stdin mode: pure spec pipeline (run_stateless_guest) ─────────────────
+    if (file_paths.items.len == 0) {
+        const input_bytes = zkvm_io.read_input(allocator) catch |err| {
+            std.debug.print("error: failed to read stdin: {}\n", .{err});
             std.process.exit(1);
         };
-    } else blk: {
+        const output_bytes = runStatelessGuest(allocator, input_bytes) catch |err| {
+            std.debug.print("error: stateless validation failed: {}\n", .{err});
+            std.process.exit(1);
+        };
+        zkvm_io.write_output(output_bytes);
+        return;
+    }
+
+    // ── file mode: debug-friendly execution ───────────────────────────────────
+    const si: input.StatelessInput = blk: {
         const block_path = file_paths.items[0];
         const witness_path = if (file_paths.items.len > 1) file_paths.items[1] else "examples/witness.json";
 
