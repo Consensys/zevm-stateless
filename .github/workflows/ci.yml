@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: ["main"]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+      - name: Check formatting
+        run: zig fmt --check src/ build.zig
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+      - name: Build (Debug)
+        run: zig build
+      - name: Build (ReleaseFast)
+        run: zig build -Doptimize=ReleaseFast
+
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+      - name: Run unit tests
+        run: zig build test
+
+  state-tests:
+    name: State Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+      - name: Cache fixtures
+        uses: actions/cache@v4
+        with:
+          path: spec-tests/fixtures
+          key: spec-test-fixtures-${{ vars.SPEC_TEST_VERSION || 'v5.4.0' }}
+      - name: Fetch fixtures
+        run: make fetch-fixtures
+      - name: Run state tests
+        run: make state-tests
+
+  blockchain-tests:
+    name: Blockchain Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: mlugg/setup-zig@v2
+        with:
+          version: "0.15.2"
+      - name: Cache fixtures
+        uses: actions/cache@v4
+        with:
+          path: spec-tests/fixtures
+          key: spec-test-fixtures-${{ vars.SPEC_TEST_VERSION || 'v5.4.0' }}
+      - name: Fetch fixtures
+        run: make fetch-fixtures
+      - name: Run blockchain tests
+        run: make blockchain-tests
