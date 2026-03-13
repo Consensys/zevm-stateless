@@ -29,6 +29,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.15.2"
+      - name: Install dependencies
+        run: make install-deps
       - name: Build (Debug)
         run: zig build
       - name: Build (ReleaseFast)
@@ -42,6 +44,8 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.15.2"
+      - name: Install dependencies
+        run: make install-deps
       - name: Run unit tests
         run: zig build test
 
@@ -53,10 +57,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.15.2"
+      - name: Install dependencies
+        run: make install-deps
       - name: Cache fixtures
         uses: actions/cache@v4
         with:
-          path: spec-tests/fixtures
+          path: spec-tests
           key: spec-test-fixtures-${{ vars.SPEC_TEST_VERSION || 'v5.4.0' }}
       - name: Fetch fixtures
         run: make fetch-fixtures
@@ -71,10 +77,12 @@ jobs:
       - uses: mlugg/setup-zig@v2
         with:
           version: "0.15.2"
+      - name: Install dependencies
+        run: make install-deps
       - name: Cache fixtures
         uses: actions/cache@v4
         with:
-          path: spec-tests/fixtures
+          path: spec-tests
           key: spec-test-fixtures-${{ vars.SPEC_TEST_VERSION || 'v5.4.0' }}
       - name: Fetch fixtures
         run: make fetch-fixtures

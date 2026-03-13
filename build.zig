@@ -11,6 +11,23 @@ pub fn build(b: *std.Build) void {
     const libblst_path   = b.fmt("{s}/lib/libblst.a", .{crypto_prefix});
     const libmcl_path    = b.fmt("{s}/lib/libmcl.a", .{crypto_prefix});
 
+    // mcl is built with g++ on Linux, which embeds libstdc++ symbol references
+    // into the .a archive. Zig's LLD cannot resolve these against the system
+    // libstdc++ reliably. The .so avoids the problem: its C++ deps are resolved
+    // at load time by the OS dynamic linker. On macOS, Homebrew mcl is compiled
+    // with clang/libc++ so static linking with linkLibCpp() works correctly.
+    const addMcl = struct {
+        fn call(step: *std.Build.Step.Compile, linux: bool, mcl_path: []const u8) void {
+            if (linux) {
+                step.addLibraryPath(.{ .cwd_relative = "/usr/local/lib" });
+                step.linkSystemLibrary("mcl");
+            } else {
+                step.addObjectFile(.{ .cwd_relative = mcl_path });
+                step.linkLibCpp();
+            }
+        }
+    }.call;
+
     // zevm dependency
     const zevm_dep = b.dependency("zevm", .{
         .target = target,
@@ -136,6 +153,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/main_allocator.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // zkvm_io — injectable I/O module for the zevm_stateless binary.
@@ -186,8 +204,7 @@ pub fn build(b: *std.Build) void {
     exe.linkSystemLibrary("c");
     exe.linkSystemLibrary("m");
     exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    exe.linkLibCpp();
+    addMcl(exe, is_linux, libmcl_path);
 
     b.installArtifact(exe);
 
@@ -226,8 +243,10 @@ pub fn build(b: *std.Build) void {
     gen_example_step.dependOn(&run_gen_example.step);
 
     const mod_tests = b.addTest(.{ .root_module = mod });
+    mod_tests.linkLibC();
     const run_mod_tests = b.addRunArtifact(mod_tests);
     const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    exe_tests.linkLibC();
     const run_exe_tests = b.addRunArtifact(exe_tests);
 
     // MPT integration tests in src/mpt/test.zig
@@ -240,6 +259,7 @@ pub fn build(b: *std.Build) void {
     mpt_test_mod.addImport("mpt", mpt_mod);
     mpt_test_mod.addImport("input", input_mod);
     const mpt_tests = b.addTest(.{ .root_module = mpt_test_mod });
+    mpt_tests.linkLibC();
     const run_mpt_tests = b.addRunArtifact(mpt_tests);
 
     // WitnessDatabase integration tests in src/db/test.zig
@@ -255,6 +275,7 @@ pub fn build(b: *std.Build) void {
     db_test_mod.addImport("input", input_mod);
     db_test_mod.addImport("db", db_mod);
     const db_tests = b.addTest(.{ .root_module = db_test_mod });
+    db_tests.linkLibC();
     const run_db_tests = b.addRunArtifact(db_tests);
 
     const test_step = b.step("test", "Run tests");
@@ -286,6 +307,7 @@ pub fn build(b: *std.Build) void {
         .root_source_file = b.path("src/executor/executor_allocator.zig"),
         .target = target,
         .optimize = optimize,
+        .link_libc = true,
     });
 
     // executor_types — canonical EVM type definitions; no external deps
@@ -407,8 +429,7 @@ pub fn build(b: *std.Build) void {
     t8n_exe.linkSystemLibrary("c");
     t8n_exe.linkSystemLibrary("m");
     t8n_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    t8n_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    t8n_exe.linkLibCpp();
+    addMcl(t8n_exe, is_linux, libmcl_path);
 
     b.installArtifact(t8n_exe);
 
@@ -458,8 +479,7 @@ pub fn build(b: *std.Build) void {
     spec_test_exe.linkSystemLibrary("c");
     spec_test_exe.linkSystemLibrary("m");
     spec_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    spec_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    spec_test_exe.linkLibCpp();
+    addMcl(spec_test_exe, is_linux, libmcl_path);
 
     b.installArtifact(spec_test_exe);
 
@@ -522,8 +542,7 @@ pub fn build(b: *std.Build) void {
     bc_test_exe.linkSystemLibrary("c");
     bc_test_exe.linkSystemLibrary("m");
     bc_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    bc_test_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    bc_test_exe.linkLibCpp();
+    addMcl(bc_test_exe, is_linux, libmcl_path);
 
     b.installArtifact(bc_test_exe);
 
@@ -597,8 +616,7 @@ pub fn build(b: *std.Build) void {
     hive_rlp_exe.linkSystemLibrary("c");
     hive_rlp_exe.linkSystemLibrary("m");
     hive_rlp_exe.addObjectFile(.{ .cwd_relative = libblst_path });
-    hive_rlp_exe.addObjectFile(.{ .cwd_relative = libmcl_path });
-    hive_rlp_exe.linkLibCpp();
+    addMcl(hive_rlp_exe, is_linux, libmcl_path);
 
     b.installArtifact(hive_rlp_exe);
 
