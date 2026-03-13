@@ -2,26 +2,31 @@
 
 Stateless EVM block verifier in Zig. Verifies MPT proofs and executes blocks against a witness, with no access to the full state database.
 
-## Dependencies
+## Quick start
+
+### Dependencies
 
 - [Zig](https://ziglang.org/) 0.15.1
 - [zevm](https://github.com/Consensys/zevm) v0.3.1 (fetched automatically)
 - `curl` and `jq`
 
-## Quick start
+for mcl and blst library requirements:
+`make install-deps`
 
-## Synthetic example
+
+### Unit Tests 
 
 ```bash
-zig build gen-example   # generate examples/block.json + witness.json
-zig build run           # run against them
-zig build test          # run all tests
+zig build test          # run all unit tests
 ```
 
 ## Test vectors
 
+Fetch and run execution-spec-tests :
 ```bash
-zig build run-test-block
+make blockchain-tests  # run just blockchaing spec tests
+make state-tests       # run just state spec tests
+make spec-tests        # run all execution spec tests
 ```
 
 Runs against `test/vectors/test_block.json` + `test/vectors/test_block_witness.json`
@@ -212,7 +217,7 @@ t8n --input.alloc <alloc.json>  --input.env <env.json>  --input.txs <txs.json> \
 
 ### Supported forks
 
-`Frontier`, `Homestead`, `EIP150`, `EIP158`, `Byzantium`, `Constantinople`, `Istanbul`, `Berlin`, `London`, `Paris`, `Shanghai`, `Cancun`, `Prague`
+`Frontier`, `Homestead`, `EIP150`, `EIP158`, `Byzantium`, `Constantinople`, `Istanbul`, `Berlin`, `London`, `Paris`, `Shanghai`, `Cancun`, `Prague`, `Osaka`
 
 ### Example: ETH transfer
 

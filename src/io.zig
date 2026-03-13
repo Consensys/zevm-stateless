@@ -25,7 +25,7 @@ const std = @import("std");
 const input_mod = @import("input");
 const output_mod = @import("output");
 const rlp_decode = @import("rlp_decode");
-const json_mod = @import("json.zig");
+const json_mod = @import("json");
 const zkvm_io = @import("zkvm_io");
 
 // ── deserializeStatelessInput ─────────────────────────────────────────────────

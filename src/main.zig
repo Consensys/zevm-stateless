@@ -1,7 +1,7 @@
 const std = @import("std");
 
-const io = @import("io.zig");
-const json = @import("json.zig");
+const io = @import("io");
+const json = @import("json");
 const rlp_decode = @import("rlp_decode");
 const input = @import("input");
 const executor = @import("executor");

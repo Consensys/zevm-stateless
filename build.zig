@@ -145,6 +145,38 @@ pub fn build(b: *std.Build) void {
     mod.addImport("db", db_mod);
     mod.addImport("executor", executor_mod);
 
+    // json — JSON I/O (block.json + witness.json parsing); shared by main and io modules
+    const json_mod = b.createModule(.{
+        .root_source_file = b.path("src/json.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    json_mod.addImport("input", input_mod);
+    json_mod.addImport("mpt", mpt_mod);
+    json_mod.addImport("rlp_decode", rlp_decode_mod);
+
+    // io_ssz — SSZ input deserialization (default zevm-stateless binary)
+    const io_ssz_mod = b.createModule(.{
+        .root_source_file = b.path("src/io_ssz.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    io_ssz_mod.addImport("input", input_mod);
+    io_ssz_mod.addImport("output", output_mod);
+    io_ssz_mod.addImport("rlp_decode", rlp_decode_mod);
+    io_ssz_mod.addImport("json", json_mod);
+
+    // io_rlp — RLP input deserialization (zevm-stateless-rlp binary)
+    const io_rlp_mod = b.createModule(.{
+        .root_source_file = b.path("src/io.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    io_rlp_mod.addImport("input", input_mod);
+    io_rlp_mod.addImport("output", output_mod);
+    io_rlp_mod.addImport("rlp_decode", rlp_decode_mod);
+    io_rlp_mod.addImport("json", json_mod);
+
     // main_allocator — injectable allocator for the zevm_stateless binary.
     // Default: std.heap.c_allocator (suitable for native builds).
     // Override for zkVM builds:
@@ -165,6 +197,10 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Deferred: wire zkvm_io into io modules (zkvm_io_mod must exist first)
+    io_ssz_mod.addImport("zkvm_io", zkvm_io_mod);
+    io_rlp_mod.addImport("zkvm_io", zkvm_io_mod);
 
     const exe = b.addExecutable(.{
         .name = "zevm_stateless",
@@ -193,8 +229,10 @@ pub fn build(b: *std.Build) void {
     exe.root_module.addImport("db", db_mod);
     exe.root_module.addImport("executor", executor_mod);
     exe.root_module.addImport("rlp_decode", rlp_decode_mod);
+    exe.root_module.addImport("json", json_mod);
     exe.root_module.addImport("main_allocator", main_allocator_mod);
     exe.root_module.addImport("zkvm_io", zkvm_io_mod);
+    exe.root_module.addImport("io", io_ssz_mod);
 
     // Link crypto libraries required by native_executor_transition (secp256k1, OpenSSL, blst, mcl)
     exe.addIncludePath(.{ .cwd_relative = crypto_include });
@@ -207,6 +245,49 @@ pub fn build(b: *std.Build) void {
     addMcl(exe, is_linux, libmcl_path);
 
     b.installArtifact(exe);
+
+    // ---------------------------------------------------------------------------
+    // zevm-stateless-rlp — identical to zevm-stateless but reads RLP-encoded input
+    // ---------------------------------------------------------------------------
+    const exe_rlp = b.addExecutable(.{
+        .name = "zevm-stateless-rlp",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "zevm_stateless", .module = mod },
+            },
+        }),
+    });
+    exe_rlp.root_module.addImport("primitives", primitives);
+    exe_rlp.root_module.addImport("bytecode", bytecode);
+    exe_rlp.root_module.addImport("state", state);
+    exe_rlp.root_module.addImport("database", database);
+    exe_rlp.root_module.addImport("context", context);
+    exe_rlp.root_module.addImport("interpreter", interpreter);
+    exe_rlp.root_module.addImport("precompile", precompile);
+    exe_rlp.root_module.addImport("handler", handler);
+    exe_rlp.root_module.addImport("inspector", inspector);
+    exe_rlp.root_module.addImport("input", input_mod);
+    exe_rlp.root_module.addImport("output", output_mod);
+    exe_rlp.root_module.addImport("mpt", mpt_mod);
+    exe_rlp.root_module.addImport("db", db_mod);
+    exe_rlp.root_module.addImport("executor", executor_mod);
+    exe_rlp.root_module.addImport("rlp_decode", rlp_decode_mod);
+    exe_rlp.root_module.addImport("json", json_mod);
+    exe_rlp.root_module.addImport("main_allocator", main_allocator_mod);
+    exe_rlp.root_module.addImport("zkvm_io", zkvm_io_mod);
+    exe_rlp.root_module.addImport("io", io_rlp_mod);
+    exe_rlp.addIncludePath(.{ .cwd_relative = crypto_include });
+    exe_rlp.linkSystemLibrary("secp256k1");
+    exe_rlp.linkSystemLibrary("ssl");
+    exe_rlp.linkSystemLibrary("crypto");
+    exe_rlp.linkSystemLibrary("c");
+    exe_rlp.linkSystemLibrary("m");
+    exe_rlp.addObjectFile(.{ .cwd_relative = libblst_path });
+    addMcl(exe_rlp, is_linux, libmcl_path);
+    b.installArtifact(exe_rlp);
 
     const run_step = b.step("run", "Run the app");
     const run_cmd = b.addRunArtifact(exe);
