@@ -78,17 +78,15 @@ const TransitionEntry = struct {
     k: []const u8,
     before: primitives.SpecId,
     after: primitives.SpecId,
-    before_name: []const u8,
-    after_name: []const u8,
 };
 
 const transition_table = [_]TransitionEntry{
-    .{ .k = "ParisToShanghaiAtTime15k", .before = .merge, .after = .shanghai, .before_name = "Paris", .after_name = "Shanghai" },
-    .{ .k = "ShanghaiToCancunAtTime15k", .before = .shanghai, .after = .cancun, .before_name = "Shanghai", .after_name = "Cancun" },
-    .{ .k = "CancunToPragueAtTime15k", .before = .cancun, .after = .prague, .before_name = "Cancun", .after_name = "Prague" },
-    .{ .k = "PragueToOsakaAtTime15k", .before = .prague, .after = .osaka, .before_name = "Prague", .after_name = "Osaka" },
-    .{ .k = "OsakaToBPO1AtTime15k", .before = .osaka, .after = .bpo1, .before_name = "Osaka", .after_name = "BPO1" },
-    .{ .k = "BPO1ToBPO2AtTime15k", .before = .bpo1, .after = .bpo2, .before_name = "BPO1", .after_name = "BPO2" },
+    .{ .k = "ParisToShanghaiAtTime15k", .before = .merge, .after = .shanghai },
+    .{ .k = "ShanghaiToCancunAtTime15k", .before = .shanghai, .after = .cancun },
+    .{ .k = "CancunToPragueAtTime15k", .before = .cancun, .after = .prague },
+    .{ .k = "PragueToOsakaAtTime15k", .before = .prague, .after = .osaka },
+    .{ .k = "OsakaToBPO1AtTime15k", .before = .osaka, .after = .bpo1 },
+    .{ .k = "BPO1ToBPO2AtTime15k", .before = .bpo1, .after = .bpo2 },
 };
 
 /// For transition fork names (e.g. "CancunToPragueAtTime15k"), returns the
@@ -109,7 +107,7 @@ pub fn specForBlock(name: []const u8, timestamp: u64) ?primitives.SpecId {
 pub fn activeForkName(name: []const u8, timestamp: u64) []const u8 {
     for (transition_table) |t| {
         if (std.mem.eql(u8, name, t.k)) {
-            return if (timestamp >= 15000) t.after_name else t.before_name;
+            return if (timestamp >= 15000) specName(t.after) else specName(t.before);
         }
     }
     return name;
