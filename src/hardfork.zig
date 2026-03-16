@@ -3,7 +3,7 @@
 ///
 /// Intentionally outside the executor so that string handling and schedule
 /// tables do not pollute the core execution path.
-const std        = @import("std");
+const std = @import("std");
 const primitives = @import("primitives");
 
 // ─── Fork name ↔ SpecId ───────────────────────────────────────────────────────
@@ -12,27 +12,27 @@ const primitives = @import("primitives");
 pub fn specName(spec: primitives.SpecId) []const u8 {
     return switch (spec) {
         .frontier, .frontier_thawing => "Frontier",
-        .homestead                   => "Homestead",
-        .dao_fork                    => "DAO",
-        .tangerine                   => "EIP150",
-        .spurious_dragon             => "EIP158",
-        .byzantium                   => "Byzantium",
-        .constantinople              => "Constantinople",
-        .petersburg                  => "Petersburg",
-        .istanbul                    => "Istanbul",
-        .muir_glacier                => "MuirGlacier",
-        .berlin                      => "Berlin",
-        .london                      => "London",
-        .arrow_glacier               => "ArrowGlacier",
-        .gray_glacier                => "GrayGlacier",
-        .merge                       => "Paris",
-        .shanghai                    => "Shanghai",
-        .cancun                      => "Cancun",
-        .prague                      => "Prague",
-        .osaka                       => "Osaka",
-        .bpo1                        => "BPO1",
-        .bpo2                        => "BPO2",
-        else                         => "Unknown",
+        .homestead => "Homestead",
+        .dao_fork => "DAO",
+        .tangerine => "EIP150",
+        .spurious_dragon => "EIP158",
+        .byzantium => "Byzantium",
+        .constantinople => "Constantinople",
+        .petersburg => "Petersburg",
+        .istanbul => "Istanbul",
+        .muir_glacier => "MuirGlacier",
+        .berlin => "Berlin",
+        .london => "London",
+        .arrow_glacier => "ArrowGlacier",
+        .gray_glacier => "GrayGlacier",
+        .merge => "Paris",
+        .shanghai => "Shanghai",
+        .cancun => "Cancun",
+        .prague => "Prague",
+        .osaka => "Osaka",
+        .bpo1 => "BPO1",
+        .bpo2 => "BPO2",
+        else => "Unknown",
     };
 }
 
@@ -41,30 +41,30 @@ pub fn specName(spec: primitives.SpecId) []const u8 {
 pub fn specFromFork(name: []const u8) ?primitives.SpecId {
     const Entry = struct { k: []const u8, v: primitives.SpecId };
     const table = [_]Entry{
-        .{ .k = "Frontier",           .v = .frontier },
-        .{ .k = "Homestead",          .v = .homestead },
-        .{ .k = "EIP150",             .v = .tangerine },
-        .{ .k = "TangerineWhistle",   .v = .tangerine },
-        .{ .k = "EIP158",             .v = .spurious_dragon },
-        .{ .k = "SpuriousDragon",     .v = .spurious_dragon },
-        .{ .k = "Byzantium",          .v = .byzantium },
-        .{ .k = "Constantinople",     .v = .constantinople },
-        .{ .k = "ConstantinopleFix",  .v = .petersburg },
-        .{ .k = "Petersburg",         .v = .petersburg },
-        .{ .k = "Istanbul",           .v = .istanbul },
-        .{ .k = "MuirGlacier",        .v = .muir_glacier },
-        .{ .k = "Berlin",             .v = .berlin },
-        .{ .k = "London",             .v = .london },
-        .{ .k = "ArrowGlacier",       .v = .arrow_glacier },
-        .{ .k = "GrayGlacier",        .v = .gray_glacier },
-        .{ .k = "Merge",              .v = .merge },
-        .{ .k = "Paris",              .v = .merge },
-        .{ .k = "Shanghai",           .v = .shanghai },
-        .{ .k = "Cancun",             .v = .cancun },
-        .{ .k = "Prague",             .v = .prague },
-        .{ .k = "Osaka",              .v = .osaka },
-        .{ .k = "BPO1",               .v = .bpo1 },
-        .{ .k = "BPO2",               .v = .bpo2 },
+        .{ .k = "Frontier", .v = .frontier },
+        .{ .k = "Homestead", .v = .homestead },
+        .{ .k = "EIP150", .v = .tangerine },
+        .{ .k = "TangerineWhistle", .v = .tangerine },
+        .{ .k = "EIP158", .v = .spurious_dragon },
+        .{ .k = "SpuriousDragon", .v = .spurious_dragon },
+        .{ .k = "Byzantium", .v = .byzantium },
+        .{ .k = "Constantinople", .v = .constantinople },
+        .{ .k = "ConstantinopleFix", .v = .petersburg },
+        .{ .k = "Petersburg", .v = .petersburg },
+        .{ .k = "Istanbul", .v = .istanbul },
+        .{ .k = "MuirGlacier", .v = .muir_glacier },
+        .{ .k = "Berlin", .v = .berlin },
+        .{ .k = "London", .v = .london },
+        .{ .k = "ArrowGlacier", .v = .arrow_glacier },
+        .{ .k = "GrayGlacier", .v = .gray_glacier },
+        .{ .k = "Merge", .v = .merge },
+        .{ .k = "Paris", .v = .merge },
+        .{ .k = "Shanghai", .v = .shanghai },
+        .{ .k = "Cancun", .v = .cancun },
+        .{ .k = "Prague", .v = .prague },
+        .{ .k = "Osaka", .v = .osaka },
+        .{ .k = "BPO1", .v = .bpo1 },
+        .{ .k = "BPO2", .v = .bpo2 },
     };
     for (table) |e| {
         if (std.mem.eql(u8, name, e.k)) return e.v;
@@ -75,20 +75,20 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
 // ─── Transition forks ─────────────────────────────────────────────────────────
 
 const TransitionEntry = struct {
-    k:           []const u8,
-    before:      primitives.SpecId,
-    after:       primitives.SpecId,
+    k: []const u8,
+    before: primitives.SpecId,
+    after: primitives.SpecId,
     before_name: []const u8,
-    after_name:  []const u8,
+    after_name: []const u8,
 };
 
 const transition_table = [_]TransitionEntry{
-    .{ .k = "ParisToShanghaiAtTime15k",  .before = .merge,    .after = .shanghai, .before_name = "Paris",    .after_name = "Shanghai" },
-    .{ .k = "ShanghaiToCancunAtTime15k", .before = .shanghai, .after = .cancun,   .before_name = "Shanghai", .after_name = "Cancun"   },
-    .{ .k = "CancunToPragueAtTime15k",   .before = .cancun,   .after = .prague,   .before_name = "Cancun",   .after_name = "Prague"   },
-    .{ .k = "PragueToOsakaAtTime15k",    .before = .prague,   .after = .osaka,    .before_name = "Prague",   .after_name = "Osaka"    },
-    .{ .k = "OsakaToBPO1AtTime15k",      .before = .osaka,    .after = .bpo1,     .before_name = "Osaka",    .after_name = "BPO1"     },
-    .{ .k = "BPO1ToBPO2AtTime15k",       .before = .bpo1,     .after = .bpo2,     .before_name = "BPO1",     .after_name = "BPO2"     },
+    .{ .k = "ParisToShanghaiAtTime15k", .before = .merge, .after = .shanghai, .before_name = "Paris", .after_name = "Shanghai" },
+    .{ .k = "ShanghaiToCancunAtTime15k", .before = .shanghai, .after = .cancun, .before_name = "Shanghai", .after_name = "Cancun" },
+    .{ .k = "CancunToPragueAtTime15k", .before = .cancun, .after = .prague, .before_name = "Cancun", .after_name = "Prague" },
+    .{ .k = "PragueToOsakaAtTime15k", .before = .prague, .after = .osaka, .before_name = "Prague", .after_name = "Osaka" },
+    .{ .k = "OsakaToBPO1AtTime15k", .before = .osaka, .after = .bpo1, .before_name = "Osaka", .after_name = "BPO1" },
+    .{ .k = "BPO1ToBPO2AtTime15k", .before = .bpo1, .after = .bpo2, .before_name = "BPO1", .after_name = "BPO2" },
 };
 
 /// For transition fork names (e.g. "CancunToPragueAtTime15k"), returns the
@@ -130,14 +130,14 @@ pub fn mainnetSpec(block_number: u64, timestamp: u64) primitives.SpecId {
     if (block_number >= 13_773_000) return .arrow_glacier;
     if (block_number >= 12_965_000) return .london;
     if (block_number >= 12_244_000) return .berlin;
-    if (block_number >= 9_200_000)  return .muir_glacier;
-    if (block_number >= 9_069_000)  return .istanbul;
-    if (block_number >= 7_280_000)  return .petersburg;
-    if (block_number >= 4_370_000)  return .byzantium;
-    if (block_number >= 2_675_000)  return .spurious_dragon;
-    if (block_number >= 2_463_000)  return .tangerine;
-    if (block_number >= 1_920_000)  return .dao_fork;
-    if (block_number >= 1_150_000)  return .homestead;
+    if (block_number >= 9_200_000) return .muir_glacier;
+    if (block_number >= 9_069_000) return .istanbul;
+    if (block_number >= 7_280_000) return .petersburg;
+    if (block_number >= 4_370_000) return .byzantium;
+    if (block_number >= 2_675_000) return .spurious_dragon;
+    if (block_number >= 2_463_000) return .tangerine;
+    if (block_number >= 1_920_000) return .dao_fork;
+    if (block_number >= 1_150_000) return .homestead;
     return .frontier;
 }
 
@@ -146,13 +146,9 @@ pub fn mainnetSpec(block_number: u64, timestamp: u64) primitives.SpecId {
 /// Mining reward in wei; -1 means disabled (post-Merge).
 pub fn blockReward(spec: primitives.SpecId) i64 {
     return switch (spec) {
-        .frontier, .frontier_thawing,
-        .homestead, .dao_fork,
-        .tangerine, .spurious_dragon         => 5_000_000_000_000_000_000,
-        .byzantium                           => 3_000_000_000_000_000_000,
-        .constantinople, .petersburg,
-        .istanbul, .muir_glacier, .berlin,
-        .london, .arrow_glacier, .gray_glacier => 2_000_000_000_000_000_000,
-        else                                 => -1, // post-Merge: no block reward
+        .frontier, .frontier_thawing, .homestead, .dao_fork, .tangerine, .spurious_dragon => 5_000_000_000_000_000_000,
+        .byzantium => 3_000_000_000_000_000_000,
+        .constantinople, .petersburg, .istanbul, .muir_glacier, .berlin, .london, .arrow_glacier, .gray_glacier => 2_000_000_000_000_000_000,
+        else => -1, // post-Merge: no block reward
     };
 }

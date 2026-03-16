@@ -388,9 +388,9 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("executor_types", executor_types_mod);
     executor_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
     executor_mod.addImport("executor_transition", native_executor_transition_mod);
-    executor_mod.addImport("executor_output",     native_executor_output_mod);
-    executor_mod.addImport("hardfork",            hardfork_mod);
-    executor_mod.addImport("executor_tx_decode",  native_executor_tx_decode_mod);
+    executor_mod.addImport("executor_output", native_executor_output_mod);
+    executor_mod.addImport("hardfork", hardfork_mod);
+    executor_mod.addImport("executor_tx_decode", native_executor_tx_decode_mod);
 
     // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
     const t8n_input_mod = b.createModule(.{
@@ -417,8 +417,9 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "mpt_builder", .module = mpt_builder_mod },
                 .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output", .module = native_executor_output_mod     },
-                .{ .name = "hardfork", .module = hardfork_mod                   },            },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
+                .{ .name = "hardfork", .module = hardfork_mod },
+            },
         }),
     });
     // secp256k1_recovery.h and secp256k1.h are in the Homebrew include path.
@@ -468,9 +469,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "mpt_builder", .module = mpt_builder_mod },
                 .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output", .module = native_executor_output_mod     },
-                .{ .name = "t8n_input", .module = t8n_input_mod                  },
-                .{ .name = "hardfork", .module = hardfork_mod                   },            },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
+                .{ .name = "t8n_input", .module = t8n_input_mod },
+                .{ .name = "hardfork", .module = hardfork_mod },
+            },
         }),
     });
     spec_test_exe.addIncludePath(.{ .cwd_relative = crypto_include });
@@ -506,13 +508,13 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    blockchain_test_runner_mod.addImport("primitives",           primitives);
-    blockchain_test_runner_mod.addImport("executor_types",       executor_types_mod);
-    blockchain_test_runner_mod.addImport("executor_transition",  native_executor_transition_mod);
-    blockchain_test_runner_mod.addImport("executor_output",      native_executor_output_mod);
-    blockchain_test_runner_mod.addImport("executor_tx_decode",   native_executor_tx_decode_mod);
-    blockchain_test_runner_mod.addImport("mpt",                  mpt_mod);
-    blockchain_test_runner_mod.addImport("hardfork",             hardfork_mod);
+    blockchain_test_runner_mod.addImport("primitives", primitives);
+    blockchain_test_runner_mod.addImport("executor_types", executor_types_mod);
+    blockchain_test_runner_mod.addImport("executor_transition", native_executor_transition_mod);
+    blockchain_test_runner_mod.addImport("executor_output", native_executor_output_mod);
+    blockchain_test_runner_mod.addImport("executor_tx_decode", native_executor_tx_decode_mod);
+    blockchain_test_runner_mod.addImport("mpt", mpt_mod);
+    blockchain_test_runner_mod.addImport("hardfork", hardfork_mod);
     const bc_test_exe = b.addExecutable(.{
         .name = "blockchain-test-runner",
         .root_module = b.createModule(.{
@@ -603,9 +605,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
-                .{ .name = "executor_output", .module = native_executor_output_mod     },
-                .{ .name = "hardfork", .module = hardfork_mod              },
-                .{ .name = "executor_tx_decode", .module = native_executor_tx_decode_mod  },            },
+                .{ .name = "executor_output", .module = native_executor_output_mod },
+                .{ .name = "hardfork", .module = hardfork_mod },
+                .{ .name = "executor_tx_decode", .module = native_executor_tx_decode_mod },
+            },
         }),
     });
     hive_rlp_exe.addIncludePath(.{ .cwd_relative = crypto_include });

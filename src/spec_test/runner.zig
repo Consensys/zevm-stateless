@@ -367,9 +367,15 @@ pub fn runFixture(
         // blobSchedule from config (optional; used to pass per-fork blob fraction to the executor)
         const blob_schedule: ?std.json.ObjectMap = blk: {
             const cv = test_obj.get("config") orelse break :blk null;
-            const co = switch (cv) { .object => |o| o, else => break :blk null };
+            const co = switch (cv) {
+                .object => |o| o,
+                else => break :blk null,
+            };
             const bsv = co.get("blobSchedule") orelse break :blk null;
-            break :blk switch (bsv) { .object => |o| o, else => null };
+            break :blk switch (bsv) {
+                .object => |o| o,
+                else => null,
+            };
         };
 
         // Iterate forks
@@ -408,10 +414,10 @@ pub fn runFixture(
                         if (fv.object.get("baseFeeUpdateFraction")) |frac_v| {
                             env.blob_base_fee_update_fraction = switch (frac_v) {
                                 .integer => |n| @intCast(n),
-                                .string  => |s| blk: {
+                                .string => |s| blk: {
                                     const stripped = if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) s[2..] else s;
                                     break :blk std.fmt.parseInt(u64, stripped, 16) catch
-                                               std.fmt.parseInt(u64, s, 10) catch null;
+                                        std.fmt.parseInt(u64, s, 10) catch null;
                                 },
                                 else => null,
                             };

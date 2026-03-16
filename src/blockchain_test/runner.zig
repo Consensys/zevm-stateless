@@ -134,9 +134,15 @@ pub fn runFixture(
         };
         const blob_schedule: ?std.json.ObjectMap = blk: {
             const cv = test_obj.get("config") orelse break :blk null;
-            const co = switch (cv) { .object => |o| o, else => break :blk null };
+            const co = switch (cv) {
+                .object => |o| o,
+                else => break :blk null,
+            };
             const bsv = co.get("blobSchedule") orelse break :blk null;
-            break :blk switch (bsv) { .object => |o| o, else => null };
+            break :blk switch (bsv) {
+                .object => |o| o,
+                else => null,
+            };
         };
 
         // Decode SpecId from network string.
@@ -418,7 +424,10 @@ fn blobFractionForBlock(blob_schedule: ?std.json.ObjectMap, network: []const u8,
     const bs = blob_schedule orelse return null;
     const fork_name = hardfork.activeForkName(network, timestamp);
     const fork_entry = bs.get(fork_name) orelse return null;
-    const entry_obj = switch (fork_entry) { .object => |o| o, else => return null };
+    const entry_obj = switch (fork_entry) {
+        .object => |o| o,
+        else => return null,
+    };
     const fraction_val = entry_obj.get("baseFeeUpdateFraction") orelse return null;
     return jsonU64(fraction_val) catch null;
 }
