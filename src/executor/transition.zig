@@ -114,7 +114,7 @@ fn buildDb(
 fn blobFractionForSpec(spec: primitives.SpecId) u64 {
     if (primitives.isEnabledIn(spec, .bpo2)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_BPO2;
     if (primitives.isEnabledIn(spec, .bpo1)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_BPO1;
-    if (primitives.isEnabledIn(spec, .prague)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_OSAKA;
+    if (primitives.isEnabledIn(spec, .prague)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE;
     return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN;
 }
 
