@@ -534,18 +534,17 @@ pub fn transition(
                 0x00, 0x0F, 0x3d, 0xf6, 0xD7, 0x32, 0x80, 0x7E, 0xf1, 0x31,
                 0x9f, 0xB7, 0xB8, 0xBb, 0x85, 0x22, 0xd0, 0xBe, 0xac, 0x02,
             };
-            const acct = pre_alloc.get(BEACON_ROOTS_ADDRESS);
-            if (acct != null and acct.?.code.len > 0) {
-                const HISTORY_BUFFER_LENGTH: u256 = 8191;
-                const ts: u256 = env.timestamp;
-                const ts_idx = ts % HISTORY_BUFFER_LENGTH;
-                const root_idx = ts_idx + HISTORY_BUFFER_LENGTH;
-                var root_val: u256 = 0;
-                for (root) |b| root_val = (root_val << 8) | b;
-                const entry = try pre_alloc.getOrPut(arena, BEACON_ROOTS_ADDRESS);
-                try entry.value_ptr.*.storage.put(arena, ts_idx,   ts);
-                try entry.value_ptr.*.storage.put(arena, root_idx, root_val);
-            }
+            const HISTORY_BUFFER_LENGTH: u256 = 8191;
+            const ts: u256 = env.timestamp;
+            const ts_idx = ts % HISTORY_BUFFER_LENGTH;
+            const root_idx = ts_idx + HISTORY_BUFFER_LENGTH;
+            var root_val: u256 = 0;
+            for (root) |b| root_val = (root_val << 8) | b;
+
+            const entry = try pre_alloc.getOrPut(arena, BEACON_ROOTS_ADDRESS);
+            if (!entry.found_existing) entry.value_ptr.* = .{};
+            try entry.value_ptr.*.storage.put(arena, ts_idx, ts);
+            try entry.value_ptr.*.storage.put(arena, root_idx, root_val);
         }
     }
 
@@ -954,7 +953,8 @@ pub fn transition(
             .blob_gas_used = if (tx.type == 3) tx.blob_versioned_hashes.len * 131_072 else null,
             .blob_gas_price = if (tx.type == 3)
                 if (ctx.block.blob_excess_gas_and_price) |bep| bep.blob_gasprice else null
-            else null,
+            else
+                null,
         });
 
         exec_result.deinit();
@@ -1016,23 +1016,19 @@ pub fn transition(
         const SYSTEM_CALL_GAS: u64 = 30_000_000 + 21_000;
         // EIP-7002 withdrawal requests + EIP-7251 consolidation requests
         const system_contracts = [_]input.Address{
-            .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5,
-               0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6,
-               0x4c, 0x00, 0x70, 0x02 },
-            .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86,
-               0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5,
-               0x90, 0x00, 0x72, 0x51 },
+            .{ 0x00, 0x00, 0x09, 0x61, 0xef, 0x48, 0x0e, 0xb5, 0x5e, 0x80, 0xd1, 0x9a, 0xd8, 0x35, 0x79, 0xa6, 0x4c, 0x00, 0x70, 0x02 },
+            .{ 0x00, 0x00, 0xbb, 0xdd, 0xc7, 0xce, 0x48, 0x86, 0x42, 0xfb, 0x57, 0x9f, 0x8b, 0x00, 0xf3, 0xa5, 0x90, 0x00, 0x72, 0x51 },
         };
 
         // Bypass normal tx validation for system calls.
-        const saved_nonce   = ctx.cfg.disable_nonce_check;
-        const saved_bal     = ctx.cfg.disable_balance_check;
-        const saved_fee     = ctx.cfg.disable_fee_charge;
+        const saved_nonce = ctx.cfg.disable_nonce_check;
+        const saved_bal = ctx.cfg.disable_balance_check;
+        const saved_fee = ctx.cfg.disable_fee_charge;
         const saved_basefee = ctx.cfg.disable_base_fee;
-        ctx.cfg.disable_nonce_check   = true;
+        ctx.cfg.disable_nonce_check = true;
         ctx.cfg.disable_balance_check = true;
-        ctx.cfg.disable_fee_charge    = true;
-        ctx.cfg.disable_base_fee      = true;
+        ctx.cfg.disable_fee_charge = true;
+        ctx.cfg.disable_base_fee = true;
 
         for (system_contracts) |sc_addr| {
             // Per EIP-7002/7251: skip if the contract is not deployed (no code).
@@ -1041,22 +1037,22 @@ pub fn transition(
             const sc_pre = pre_alloc.get(sc_addr);
             if (sc_pre == null or sc_pre.?.code.len == 0) continue;
 
-            ctx.tx.caller             = SYSTEM_ADDRESS;
-            ctx.tx.kind               = context_mod.TxKind{ .Call = sc_addr };
-            ctx.tx.gas_limit          = SYSTEM_CALL_GAS;
-            ctx.tx.gas_price          = 0;
-            ctx.tx.gas_priority_fee   = null;
-            ctx.tx.value              = 0;
-            ctx.tx.nonce              = 0;
-            ctx.tx.tx_type            = 0;
-            ctx.tx.data               = null;
-            ctx.tx.access_list        = context_mod.AccessList{ .items = null };
-            ctx.tx.blob_hashes        = null;
+            ctx.tx.caller = SYSTEM_ADDRESS;
+            ctx.tx.kind = context_mod.TxKind{ .Call = sc_addr };
+            ctx.tx.gas_limit = SYSTEM_CALL_GAS;
+            ctx.tx.gas_price = 0;
+            ctx.tx.gas_priority_fee = null;
+            ctx.tx.value = 0;
+            ctx.tx.nonce = 0;
+            ctx.tx.tx_type = 0;
+            ctx.tx.data = null;
+            ctx.tx.access_list = context_mod.AccessList{ .items = null };
+            ctx.tx.blob_hashes = null;
             ctx.tx.authorization_list = null;
-            ctx.tx.chain_id           = chain_id;
+            ctx.tx.chain_id = chain_id;
 
             var sc_frames = handler_mod.FrameStack.new();
-            var sc_evm    = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &sc_frames);
+            var sc_evm = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &sc_frames);
             var sc_result = handler_mod.ExecuteEvm.execute(&sc_evm) catch {
                 ctx.journaled_state.discardTx();
                 continue;
@@ -1070,10 +1066,10 @@ pub fn transition(
             }
         }
 
-        ctx.cfg.disable_nonce_check   = saved_nonce;
+        ctx.cfg.disable_nonce_check = saved_nonce;
         ctx.cfg.disable_balance_check = saved_bal;
-        ctx.cfg.disable_fee_charge    = saved_fee;
-        ctx.cfg.disable_base_fee      = saved_basefee;
+        ctx.cfg.disable_fee_charge = saved_fee;
+        ctx.cfg.disable_base_fee = saved_basefee;
     }
 
     // ── Extract post-state ────────────────────────────────────────────────────
@@ -1107,9 +1103,9 @@ fn extractPostState(
     var pre_it = pre_alloc.iterator();
     while (pre_it.next()) |pre_entry| {
         var acct = input.AllocAccount{
-            .balance          = pre_entry.value_ptr.*.balance,
-            .nonce            = pre_entry.value_ptr.*.nonce,
-            .code             = pre_entry.value_ptr.*.code,
+            .balance = pre_entry.value_ptr.*.balance,
+            .nonce = pre_entry.value_ptr.*.nonce,
+            .code = pre_entry.value_ptr.*.code,
             .pre_storage_root = pre_entry.value_ptr.*.pre_storage_root,
         };
         // Clone storage (included for both normal and delta modes:

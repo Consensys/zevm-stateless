@@ -8,14 +8,14 @@
 //! All functions are allocation-free; stack buffers are used for nibble paths.
 
 const std = @import("std");
-const primitives  = @import("primitives");
-const input       = @import("input");
+const primitives = @import("primitives");
+const input = @import("input");
 const keccak_impl = @import("keccak_impl");
 
 /// RLP decoder — also re-exported so callers (e.g. io.zig) can reuse it.
 pub const rlp = @import("rlp.zig");
 const nibbles = @import("mpt_nibbles");
-const node    = @import("node.zig");
+const node = @import("node.zig");
 
 // ─── Public types ──────────────────────────────────────────────────────────────
 
@@ -32,10 +32,10 @@ pub const MptError = error{
 
 /// Decoded Ethereum account fields.
 pub const AccountState = struct {
-    nonce:        u64,
-    balance:      u256,
+    nonce: u64,
+    balance: u256,
     storage_root: primitives.Hash,
-    code_hash:    primitives.Hash,
+    code_hash: primitives.Hash,
 };
 
 // ─── keccak256 ─────────────────────────────────────────────────────────────────
@@ -91,8 +91,8 @@ fn findNode(pool: []const []const u8, hash: primitives.Hash) ?[]const u8 {
 /// non-inclusion proof (empty branch child or mismatched leaf suffix).
 pub fn verifyProof(
     root_hash: primitives.Hash,
-    key_hash:  primitives.Hash,
-    pool:      []const []const u8,
+    key_hash: primitives.Hash,
+    pool: []const []const u8,
 ) MptError!?[]const u8 {
     // Empty trie root: non-inclusion is provable without any pool nodes.
     if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
@@ -103,7 +103,7 @@ pub fn verifyProof(
     // Tracks the next expected node: either a 32-byte hash (pool lookup)
     // or an inline RLP encoding (embedded directly in the parent node).
     const ExpectedRef = union(enum) {
-        hash:        [32]u8,
+        hash: [32]u8,
         inline_node: []const u8,
     };
     var expected: ExpectedRef = .{ .hash = root_hash };
@@ -112,12 +112,12 @@ pub fn verifyProof(
     while (true) {
         // Resolve the current node.
         const node_rlp: []const u8 = switch (expected) {
-            .hash        => |h|   findNode(pool, h) orelse return error.InvalidProof,
+            .hash => |h| findNode(pool, h) orelse return error.InvalidProof,
             .inline_node => |inl| inl,
         };
 
         const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
-            error.InvalidRlp  => return error.InvalidRlp,
+            error.InvalidRlp => return error.InvalidRlp,
             error.InvalidNode => return error.InvalidNode,
         };
 
@@ -127,8 +127,8 @@ pub fn verifyProof(
                 const nibble = key_nibbles[pos];
                 pos += 1;
                 switch (b.children[nibble]) {
-                    .empty       => return null, // valid non-inclusion
-                    .hash        => |h|   expected = .{ .hash = h },
+                    .empty => return null, // valid non-inclusion
+                    .hash => |h| expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
@@ -143,8 +143,8 @@ pub fn verifyProof(
                     return null; // prefix diverges → valid non-inclusion
                 pos += prefix_nibs.len;
                 switch (e.child) {
-                    .empty       => return error.InvalidNode,
-                    .hash        => |h|   expected = .{ .hash = h },
+                    .empty => return error.InvalidNode,
+                    .hash => |h| expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
@@ -172,9 +172,9 @@ pub fn verifyProof(
 /// number of skipped nibbles for extensions.
 pub fn verifyProofVerbose(
     root_hash: primitives.Hash,
-    key_hash:  primitives.Hash,
-    pool:      []const []const u8,
-    writer:    anytype,
+    key_hash: primitives.Hash,
+    pool: []const []const u8,
+    writer: anytype,
 ) MptError!?[]const u8 {
     if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
 
@@ -182,7 +182,7 @@ pub fn verifyProofVerbose(
     nibbles.bytesToNibbles(&key_hash, &key_nibbles);
 
     const ExpectedRef = union(enum) {
-        hash:        [32]u8,
+        hash: [32]u8,
         inline_node: []const u8,
     };
     var expected: ExpectedRef = .{ .hash = root_hash };
@@ -190,12 +190,12 @@ pub fn verifyProofVerbose(
 
     while (true) {
         const node_rlp: []const u8 = switch (expected) {
-            .hash        => |h|   findNode(pool, h) orelse return error.InvalidProof,
+            .hash => |h| findNode(pool, h) orelse return error.InvalidProof,
             .inline_node => |inl| inl,
         };
 
         const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
-            error.InvalidRlp  => return error.InvalidRlp,
+            error.InvalidRlp => return error.InvalidRlp,
             error.InvalidNode => return error.InvalidNode,
         };
 
@@ -205,12 +205,12 @@ pub fn verifyProofVerbose(
                 const nibble = key_nibbles[pos];
                 pos += 1;
                 switch (expected) {
-                    .hash        => |h| writer.print("        branch    0x{x}  nibble={x}\n", .{ h, nibble }) catch {},
-                    .inline_node =>     writer.print("        branch    (inline)  nibble={x}\n", .{nibble}) catch {},
+                    .hash => |h| writer.print("        branch    0x{x}  nibble={x}\n", .{ h, nibble }) catch {},
+                    .inline_node => writer.print("        branch    (inline)  nibble={x}\n", .{nibble}) catch {},
                 }
                 switch (b.children[nibble]) {
-                    .empty       => return null,
-                    .hash        => |h|   expected = .{ .hash = h },
+                    .empty => return null,
+                    .hash => |h| expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
@@ -222,15 +222,15 @@ pub fn verifyProofVerbose(
                 const prefix_nibs = path_buf[0..hp.len];
                 if (pos + prefix_nibs.len > 64) return error.InvalidProof;
                 switch (expected) {
-                    .hash        => |h| writer.print("        extension 0x{x}  skip={d}\n", .{ h, hp.len }) catch {},
-                    .inline_node =>     writer.print("        extension (inline)  skip={d}\n", .{hp.len}) catch {},
+                    .hash => |h| writer.print("        extension 0x{x}  skip={d}\n", .{ h, hp.len }) catch {},
+                    .inline_node => writer.print("        extension (inline)  skip={d}\n", .{hp.len}) catch {},
                 }
                 if (!std.mem.eql(u8, prefix_nibs, key_nibbles[pos .. pos + prefix_nibs.len]))
                     return null;
                 pos += prefix_nibs.len;
                 switch (e.child) {
-                    .empty       => return error.InvalidNode,
-                    .hash        => |h|   expected = .{ .hash = h },
+                    .empty => return error.InvalidNode,
+                    .hash => |h| expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
@@ -243,8 +243,8 @@ pub fn verifyProofVerbose(
                 if (suffix_nibs.len != 64 - pos) return null;
                 if (!std.mem.eql(u8, suffix_nibs, key_nibbles[pos..])) return null;
                 switch (expected) {
-                    .hash        => |h| writer.print("        leaf      0x{x}\n", .{h}) catch {},
-                    .inline_node =>     writer.print("        leaf      (inline)\n", .{}) catch {},
+                    .hash => |h| writer.print("        leaf      0x{x}\n", .{h}) catch {},
+                    .inline_node => writer.print("        leaf      (inline)\n", .{}) catch {},
                 }
                 return lf.value;
             },
@@ -261,8 +261,8 @@ pub fn verifyProofVerbose(
 /// non-inclusion (address provably absent from the trie).
 pub fn verifyAccount(
     state_root: primitives.Hash,
-    address:    primitives.Address,
-    pool:       []const []const u8,
+    address: primitives.Address,
+    pool: []const []const u8,
 ) MptError!?AccountState {
     const key_hash = keccak256(&address);
     const value = try verifyProof(state_root, key_hash, pool) orelse return null;
@@ -270,39 +270,37 @@ pub fn verifyAccount(
     // Account value is RLP list: [nonce, balance, storageRoot, codeHash]
     const outer = rlp.decodeItem(value) catch return error.InvalidRlp;
     const payload = switch (outer.item) {
-        .list  => |p| p,
+        .list => |p| p,
         .bytes => return error.InvalidRlp,
     };
     var rest = payload;
 
-    const nonce_r   = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const nonce     = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp)
-        catch return error.InvalidRlp;
+    const nonce_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const nonce = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp) catch return error.InvalidRlp;
     rest = rest[nonce_r.consumed..];
 
     const balance_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const balance   = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp)
-        catch return error.InvalidRlp;
+    const balance = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp) catch return error.InvalidRlp;
     rest = rest[balance_r.consumed..];
 
     const storage_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const sbytes    = itemBytes(storage_r.item) orelse return error.InvalidRlp;
+    const sbytes = itemBytes(storage_r.item) orelse return error.InvalidRlp;
     if (sbytes.len != 32) return error.InvalidRlp;
     var storage_root: primitives.Hash = undefined;
     @memcpy(&storage_root, sbytes);
     rest = rest[storage_r.consumed..];
 
-    const code_r  = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const cbytes  = itemBytes(code_r.item) orelse return error.InvalidRlp;
+    const code_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const cbytes = itemBytes(code_r.item) orelse return error.InvalidRlp;
     if (cbytes.len != 32) return error.InvalidRlp;
     var code_hash: primitives.Hash = undefined;
     @memcpy(&code_hash, cbytes);
 
     return AccountState{
-        .nonce        = nonce,
-        .balance      = balance,
+        .nonce = nonce,
+        .balance = balance,
         .storage_root = storage_root,
-        .code_hash    = code_hash,
+        .code_hash = code_hash,
     };
 }
 
@@ -314,13 +312,13 @@ pub fn verifyAccount(
 /// Returns the decoded u256 value, or 0 for a valid non-inclusion proof.
 pub fn verifyStorage(
     storage_root: primitives.Hash,
-    slot:         primitives.Hash,
-    pool:         []const []const u8,
+    slot: primitives.Hash,
+    pool: []const []const u8,
 ) MptError!u256 {
     const key_hash = keccak256(&slot);
     const value = try verifyProof(storage_root, key_hash, pool) orelse return 0;
 
-    const r     = rlp.decodeItem(value) catch return error.InvalidRlp;
+    const r = rlp.decodeItem(value) catch return error.InvalidRlp;
     const bytes = itemBytes(r.item) orelse return error.InvalidRlp;
     if (bytes.len > 32) return error.InvalidRlp;
     return decodeUint256(bytes) catch return error.InvalidRlp;
@@ -332,8 +330,8 @@ pub fn verifyStorage(
 /// Build the index once with buildNodeIndex() and reuse across all keys.
 pub fn verifyProofIndexed(
     root_hash: primitives.Hash,
-    key_hash:  primitives.Hash,
-    index:     *const NodeIndex,
+    key_hash: primitives.Hash,
+    index: *const NodeIndex,
 ) MptError!?[]const u8 {
     if (std.mem.eql(u8, &root_hash, &EMPTY_TRIE_HASH)) return null;
 
@@ -341,7 +339,7 @@ pub fn verifyProofIndexed(
     nibbles.bytesToNibbles(&key_hash, &key_nibbles);
 
     const ExpectedRef = union(enum) {
-        hash:        [32]u8,
+        hash: [32]u8,
         inline_node: []const u8,
     };
     var expected: ExpectedRef = .{ .hash = root_hash };
@@ -349,12 +347,12 @@ pub fn verifyProofIndexed(
 
     while (true) {
         const node_rlp: []const u8 = switch (expected) {
-            .hash        => |h|   findNodeInIndex(index, h) orelse return error.InvalidProof,
+            .hash => |h| findNodeInIndex(index, h) orelse return error.InvalidProof,
             .inline_node => |inl| inl,
         };
 
         const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
-            error.InvalidRlp  => return error.InvalidRlp,
+            error.InvalidRlp => return error.InvalidRlp,
             error.InvalidNode => return error.InvalidNode,
         };
 
@@ -364,8 +362,8 @@ pub fn verifyProofIndexed(
                 const nibble = key_nibbles[pos];
                 pos += 1;
                 switch (b.children[nibble]) {
-                    .empty       => return null,
-                    .hash        => |h|   expected = .{ .hash = h },
+                    .empty => return null,
+                    .hash => |h| expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
@@ -379,8 +377,8 @@ pub fn verifyProofIndexed(
                     return null;
                 pos += prefix_nibs.len;
                 switch (e.child) {
-                    .empty       => return error.InvalidNode,
-                    .hash        => |h|   expected = .{ .hash = h },
+                    .empty => return error.InvalidNode,
+                    .hash => |h| expected = .{ .hash = h },
                     .inline_node => |inl| expected = .{ .inline_node = inl },
                 }
             },
@@ -400,60 +398,58 @@ pub fn verifyProofIndexed(
 /// Like verifyAccount but uses a pre-built NodeIndex for O(1) node lookups.
 pub fn verifyAccountIndexed(
     state_root: primitives.Hash,
-    address:    primitives.Address,
-    index:      *const NodeIndex,
+    address: primitives.Address,
+    index: *const NodeIndex,
 ) MptError!?AccountState {
     const key_hash = keccak256(&address);
     const value = try verifyProofIndexed(state_root, key_hash, index) orelse return null;
 
     const outer = rlp.decodeItem(value) catch return error.InvalidRlp;
     const payload = switch (outer.item) {
-        .list  => |p| p,
+        .list => |p| p,
         .bytes => return error.InvalidRlp,
     };
     var rest = payload;
 
-    const nonce_r   = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const nonce     = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp)
-        catch return error.InvalidRlp;
+    const nonce_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const nonce = decodeUint64(itemBytes(nonce_r.item) orelse return error.InvalidRlp) catch return error.InvalidRlp;
     rest = rest[nonce_r.consumed..];
 
     const balance_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const balance   = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp)
-        catch return error.InvalidRlp;
+    const balance = decodeUint256(itemBytes(balance_r.item) orelse return error.InvalidRlp) catch return error.InvalidRlp;
     rest = rest[balance_r.consumed..];
 
     const storage_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const sbytes    = itemBytes(storage_r.item) orelse return error.InvalidRlp;
+    const sbytes = itemBytes(storage_r.item) orelse return error.InvalidRlp;
     if (sbytes.len != 32) return error.InvalidRlp;
     var storage_root: primitives.Hash = undefined;
     @memcpy(&storage_root, sbytes);
     rest = rest[storage_r.consumed..];
 
-    const code_r  = rlp.decodeItem(rest) catch return error.InvalidRlp;
-    const cbytes  = itemBytes(code_r.item) orelse return error.InvalidRlp;
+    const code_r = rlp.decodeItem(rest) catch return error.InvalidRlp;
+    const cbytes = itemBytes(code_r.item) orelse return error.InvalidRlp;
     if (cbytes.len != 32) return error.InvalidRlp;
     var code_hash: primitives.Hash = undefined;
     @memcpy(&code_hash, cbytes);
 
     return AccountState{
-        .nonce        = nonce,
-        .balance      = balance,
+        .nonce = nonce,
+        .balance = balance,
         .storage_root = storage_root,
-        .code_hash    = code_hash,
+        .code_hash = code_hash,
     };
 }
 
 /// Like verifyStorage but uses a pre-built NodeIndex for O(1) node lookups.
 pub fn verifyStorageIndexed(
     storage_root: primitives.Hash,
-    slot:         primitives.Hash,
-    index:        *const NodeIndex,
+    slot: primitives.Hash,
+    index: *const NodeIndex,
 ) MptError!u256 {
     const key_hash = keccak256(&slot);
     const value = try verifyProofIndexed(storage_root, key_hash, index) orelse return 0;
 
-    const r     = rlp.decodeItem(value) catch return error.InvalidRlp;
+    const r = rlp.decodeItem(value) catch return error.InvalidRlp;
     const bytes = itemBytes(r.item) orelse return error.InvalidRlp;
     if (bytes.len > 32) return error.InvalidRlp;
     return decodeUint256(bytes) catch return error.InvalidRlp;
@@ -477,7 +473,6 @@ pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
             @memcpy(&addr, key[0..20]);
             current_addr = addr;
             _ = try verifyAccount(witness.state_root, addr, witness.nodes);
-
         } else if (key.len == 52) {
             var addr: primitives.Address = undefined;
             @memcpy(&addr, key[0..20]);
@@ -489,7 +484,6 @@ pub fn verifyWitness(witness: input.StateWitness) MptError!primitives.Hash {
             const account_state = try verifyAccount(witness.state_root, addr, witness.nodes);
             const storage_root = if (account_state) |as| as.storage_root else EMPTY_TRIE_HASH;
             _ = try verifyStorage(storage_root, raw_slot, witness.nodes);
-
         } else if (key.len == 32) {
             // Standalone slot: context account is the nearest preceding address key.
             if (current_addr) |addr| {
@@ -531,8 +525,8 @@ pub fn updateAccountChained(
     }
 
     const root_bytes = findNode(pool, root.*) orelse
-                       findNode(extra.items, root.*) orelse
-                       return error.InvalidProof;
+        findNode(extra.items, root.*) orelse
+        return error.InvalidProof;
     const new_root_rlp = try updNodeEx(alloc, root_bytes, &key_nibs, account_rlp, pool, extra);
     try extra.append(alloc, new_root_rlp);
     root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
@@ -551,19 +545,22 @@ const EMPTY_TRIE_HASH: primitives.Hash = .{
 };
 
 fn itemBytes(item: rlp.RlpItem) ?[]const u8 {
-    return switch (item) { .bytes => |b| b, .list => null };
+    return switch (item) {
+        .bytes => |b| b,
+        .list => null,
+    };
 }
 
 fn decodeUint64(bytes: []const u8) error{InvalidRlp}!u64 {
     if (bytes.len == 0) return 0;
-    if (bytes.len > 8)  return error.InvalidRlp;
+    if (bytes.len > 8) return error.InvalidRlp;
     var result: u64 = 0;
     for (bytes) |b| result = (result << 8) | b;
     return result;
 }
 
 fn decodeUint256(bytes: []const u8) error{InvalidRlp}!u256 {
-    if (bytes.len == 0)  return 0;
+    if (bytes.len == 0) return 0;
     if (bytes.len > 32) return error.InvalidRlp;
     var result: u256 = 0;
     for (bytes) |b| result = (result << 8) | b;
@@ -640,8 +637,8 @@ pub fn updateStorageChained(
 
     // Find root in combined pool (original witness nodes + nodes produced by prior updates)
     const root_bytes = findNode(pool, root.*) orelse
-                       findNode(extra.items, root.*) orelse
-                       return error.InvalidProof;
+        findNode(extra.items, root.*) orelse
+        return error.InvalidProof;
     const new_root_rlp = try updNodeEx(alloc, root_bytes, &key_nibs, new_val_enc, pool, extra);
     // Store new root in extra so the next update can find it
     try extra.append(alloc, new_root_rlp);
@@ -649,6 +646,214 @@ pub fn updateStorageChained(
         EMPTY_TRIE_HASH
     else
         keccak256(new_root_rlp);
+}
+
+// ─── Indexed variants of verifyWitness and chained update functions ────────────
+//
+// These accept a pre-built NodeIndex (hash→node map) produced by buildNodeIndex().
+// All pool lookups are O(1) hashmap lookups. New intermediate nodes created during
+// updates are inserted into the same index so subsequent lookups remain O(1).
+
+/// Like updateAccountChained but uses a mutable NodeIndex for O(1) lookups.
+/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
+pub fn updateAccountChainedIndexed(
+    alloc: std.mem.Allocator,
+    root: *[32]u8,
+    addr_key: [32]u8,
+    account_rlp: ?[]const u8,
+    index: *NodeIndex,
+) (MptError || error{OutOfMemory})!void {
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&addr_key, &key_nibs);
+
+    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
+        if (account_rlp) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            const h = keccak256(leaf_rlp);
+            try index.put(h, leaf_rlp);
+            root.* = h;
+        }
+        return;
+    }
+
+    const root_bytes = findNodeInIndex(index, root.*) orelse return error.InvalidProof;
+    const new_root_rlp = try updNodeExIndexed(alloc, root_bytes, &key_nibs, account_rlp, index);
+    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
+        EMPTY_TRIE_HASH
+    else blk: {
+        const h = keccak256(new_root_rlp);
+        try index.put(h, new_root_rlp);
+        break :blk h;
+    };
+}
+
+/// Like updateStorageChained but uses a mutable NodeIndex for O(1) lookups.
+/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
+pub fn updateStorageChainedIndexed(
+    alloc: std.mem.Allocator,
+    root: *[32]u8,
+    slot: [32]u8,
+    new_value: u256,
+    index: *NodeIndex,
+) (MptError || error{OutOfMemory})!void {
+    const key_hash = keccak256(&slot);
+    var key_nibs: [64]u8 = undefined;
+    nibbles.bytesToNibbles(&key_hash, &key_nibs);
+
+    const new_val_enc: ?[]const u8 = if (new_value == 0) null else blk: {
+        break :blk try updRlpU256(alloc, new_value);
+    };
+
+    if (std.mem.eql(u8, root, &EMPTY_TRIE_HASH)) {
+        if (new_val_enc) |val| {
+            const leaf_rlp = try updMakeLeaf(alloc, &key_nibs, val);
+            const h = keccak256(leaf_rlp);
+            try index.put(h, leaf_rlp);
+            root.* = h;
+        }
+        return;
+    }
+
+    const root_bytes = findNodeInIndex(index, root.*) orelse return error.InvalidProof;
+    const new_root_rlp = try updNodeExIndexed(alloc, root_bytes, &key_nibs, new_val_enc, index);
+    root.* = if (new_root_rlp.len == 1 and new_root_rlp[0] == 0x80)
+        EMPTY_TRIE_HASH
+    else blk: {
+        const h = keccak256(new_root_rlp);
+        try index.put(h, new_root_rlp);
+        break :blk h;
+    };
+}
+
+/// Like updResolveRefEx but uses NodeIndex for O(1) lookups.
+/// New nodes created during updates are inserted into the same index, so a single lookup suffices.
+fn updResolveRefExIndexed(ref: node.NodeRef, index: *const NodeIndex) MptError![]const u8 {
+    return switch (ref) {
+        .empty => &.{0x80},
+        .hash => |h| findNodeInIndex(index, h) orelse return error.InvalidProof,
+        .inline_node => |b| b,
+    };
+}
+
+/// Like updNodeEx but uses a single mutable NodeIndex for O(1) pool lookups.
+/// New intermediate nodes are inserted into `index` so subsequent chained updates find them.
+fn updNodeExIndexed(
+    alloc: std.mem.Allocator,
+    node_rlp: []const u8,
+    remaining: []const u8,
+    new_val: ?[]const u8,
+    index: *NodeIndex,
+) (MptError || error{OutOfMemory})![]const u8 {
+    if (node_rlp.len == 1 and node_rlp[0] == 0x80) {
+        if (new_val) |val| return updMakeLeaf(alloc, remaining, val);
+        return alloc.dupe(u8, &.{0x80});
+    }
+
+    const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
+        error.InvalidRlp => return error.InvalidRlp,
+        error.InvalidNode => return error.InvalidNode,
+    };
+
+    switch (decoded) {
+        .branch => |b| {
+            if (remaining.len == 0) {
+                var enc: [16][]const u8 = undefined;
+                for (b.children, 0..) |child, i| enc[i] = try updRefEnc(alloc, child);
+                return updEncodeBranch(alloc, &enc, new_val orelse &.{});
+            }
+            const nib = remaining[0];
+            const child_rlp = try updResolveRefExIndexed(b.children[nib], index);
+            const new_child_rlp = try updNodeExIndexed(alloc, child_rlp, remaining[1..], new_val, index);
+            const new_child_enc = try updHashOrEmbedExIndexed(alloc, new_child_rlp, index);
+            var enc: [16][]const u8 = undefined;
+            for (b.children, 0..) |child, i| {
+                if (i == nib) enc[i] = new_child_enc else enc[i] = try updRefEnc(alloc, child);
+            }
+            return updEncodeBranch(alloc, &enc, b.value);
+        },
+
+        .extension => |e| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(e.prefix, &path_buf) catch return error.InvalidHp;
+            if (hp.is_leaf) return error.InvalidNode;
+            const prefix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(prefix, remaining);
+
+            if (cp == prefix.len) {
+                const child_rlp = try updResolveRefExIndexed(e.child, index);
+                const new_child_rlp = try updNodeExIndexed(alloc, child_rlp, remaining[cp..], new_val, index);
+                if (new_child_rlp.len == 1 and new_child_rlp[0] == 0x80)
+                    return alloc.dupe(u8, &.{0x80});
+                const new_child_ref = try updHashOrEmbedExIndexed(alloc, new_child_rlp, index);
+                return updMakeExtension(alloc, prefix, new_child_ref);
+            }
+
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            const old_nib = prefix[cp];
+            if (cp + 1 < prefix.len) {
+                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1 ..], try updRefEnc(alloc, e.child));
+                children_enc[old_nib] = try updHashOrEmbedExIndexed(alloc, ext_rlp, index);
+            } else {
+                children_enc[old_nib] = try updRefEnc(alloc, e.child);
+            }
+            if (new_val) |val| {
+                if (cp < remaining.len) {
+                    const new_nib = remaining[cp];
+                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], val);
+                    children_enc[new_nib] = try updHashOrEmbedExIndexed(alloc, leaf_rlp, index);
+                } else {
+                    branch_val = val;
+                }
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbedExIndexed(alloc, branch_rlp, index);
+            return updMakeExtension(alloc, prefix[0..cp], branch_ref);
+        },
+
+        .leaf => |lf| {
+            var path_buf: [128]u8 = undefined;
+            const hp = nibbles.hpDecode(lf.key_end, &path_buf) catch return error.InvalidHp;
+            if (!hp.is_leaf) return error.InvalidNode;
+            const suffix = path_buf[0..hp.len];
+            const cp = nibbles.commonPrefixLen(suffix, remaining);
+
+            if (cp == suffix.len and cp == remaining.len) {
+                if (new_val) |val| return updMakeLeaf(alloc, suffix, val);
+                return alloc.dupe(u8, &.{0x80});
+            }
+
+            if (new_val == null) {
+                return updMakeLeaf(alloc, suffix, lf.value);
+            }
+
+            var children_enc: [16][]const u8 = undefined;
+            for (&children_enc) |*enc| enc.* = try alloc.dupe(u8, &.{0x80});
+            var branch_val: []const u8 = &.{};
+
+            if (cp < suffix.len) {
+                const old_nib = suffix[cp];
+                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1 ..], lf.value);
+                children_enc[old_nib] = try updHashOrEmbedExIndexed(alloc, old_leaf_rlp, index);
+            } else {
+                branch_val = lf.value;
+            }
+            if (cp < remaining.len) {
+                const new_nib = remaining[cp];
+                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], new_val.?);
+                children_enc[new_nib] = try updHashOrEmbedExIndexed(alloc, new_leaf_rlp, index);
+            } else {
+                branch_val = new_val.?;
+            }
+            const branch_rlp = try updEncodeBranch(alloc, &children_enc, branch_val);
+            if (cp == 0) return branch_rlp;
+            const branch_ref = try updHashOrEmbedExIndexed(alloc, branch_rlp, index);
+            return updMakeExtension(alloc, suffix[0..cp], branch_ref);
+        },
+    }
 }
 
 /// Recursively update a node and return its new RLP bytes.
@@ -667,7 +872,7 @@ fn updNode(
     }
 
     const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
-        error.InvalidRlp  => return error.InvalidRlp,
+        error.InvalidRlp => return error.InvalidRlp,
         error.InvalidNode => return error.InvalidNode,
     };
 
@@ -685,8 +890,7 @@ fn updNode(
             const new_child_enc = try updHashOrEmbed(alloc, new_child_rlp);
             var enc: [16][]const u8 = undefined;
             for (b.children, 0..) |child, i| {
-                if (i == nib) enc[i] = new_child_enc
-                else enc[i] = try updRefEnc(alloc, child);
+                if (i == nib) enc[i] = new_child_enc else enc[i] = try updRefEnc(alloc, child);
             }
             return updEncodeBranch(alloc, &enc, b.value);
         },
@@ -716,7 +920,7 @@ fn updNode(
             // Old extension tail goes into branch
             const old_nib = prefix[cp];
             if (cp + 1 < prefix.len) {
-                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1..], try updRefEnc(alloc, e.child));
+                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1 ..], try updRefEnc(alloc, e.child));
                 children_enc[old_nib] = try updHashOrEmbed(alloc, ext_rlp);
             } else {
                 children_enc[old_nib] = try updRefEnc(alloc, e.child);
@@ -725,7 +929,7 @@ fn updNode(
             if (new_val) |val| {
                 if (cp < remaining.len) {
                     const new_nib = remaining[cp];
-                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], val);
+                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], val);
                     children_enc[new_nib] = try updHashOrEmbed(alloc, leaf_rlp);
                 } else {
                     branch_val = val;
@@ -762,14 +966,14 @@ fn updNode(
 
             if (cp < suffix.len) {
                 const old_nib = suffix[cp];
-                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1..], lf.value);
+                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1 ..], lf.value);
                 children_enc[old_nib] = try updHashOrEmbed(alloc, old_leaf_rlp);
             } else {
                 branch_val = lf.value; // existing leaf ends exactly at the branch
             }
             if (cp < remaining.len) {
                 const new_nib = remaining[cp];
-                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], new_val.?);
+                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], new_val.?);
                 children_enc[new_nib] = try updHashOrEmbed(alloc, new_leaf_rlp);
             } else {
                 branch_val = new_val.?; // new key ends exactly at the branch
@@ -797,7 +1001,7 @@ fn updNodeEx(
     }
 
     const decoded = node.decodeNode(node_rlp) catch |err| switch (err) {
-        error.InvalidRlp  => return error.InvalidRlp,
+        error.InvalidRlp => return error.InvalidRlp,
         error.InvalidNode => return error.InvalidNode,
     };
 
@@ -814,8 +1018,7 @@ fn updNodeEx(
             const new_child_enc = try updHashOrEmbedEx(alloc, new_child_rlp, extra);
             var enc: [16][]const u8 = undefined;
             for (b.children, 0..) |child, i| {
-                if (i == nib) enc[i] = new_child_enc
-                else enc[i] = try updRefEnc(alloc, child);
+                if (i == nib) enc[i] = new_child_enc else enc[i] = try updRefEnc(alloc, child);
             }
             return updEncodeBranch(alloc, &enc, b.value);
         },
@@ -842,7 +1045,7 @@ fn updNodeEx(
 
             const old_nib = prefix[cp];
             if (cp + 1 < prefix.len) {
-                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1..], try updRefEnc(alloc, e.child));
+                const ext_rlp = try updMakeExtension(alloc, prefix[cp + 1 ..], try updRefEnc(alloc, e.child));
                 children_enc[old_nib] = try updHashOrEmbedEx(alloc, ext_rlp, extra);
             } else {
                 children_enc[old_nib] = try updRefEnc(alloc, e.child);
@@ -850,7 +1053,7 @@ fn updNodeEx(
             if (new_val) |val| {
                 if (cp < remaining.len) {
                     const new_nib = remaining[cp];
-                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], val);
+                    const leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], val);
                     children_enc[new_nib] = try updHashOrEmbedEx(alloc, leaf_rlp, extra);
                 } else {
                     branch_val = val;
@@ -884,14 +1087,14 @@ fn updNodeEx(
 
             if (cp < suffix.len) {
                 const old_nib = suffix[cp];
-                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1..], lf.value);
+                const old_leaf_rlp = try updMakeLeaf(alloc, suffix[cp + 1 ..], lf.value);
                 children_enc[old_nib] = try updHashOrEmbedEx(alloc, old_leaf_rlp, extra);
             } else {
                 branch_val = lf.value;
             }
             if (cp < remaining.len) {
                 const new_nib = remaining[cp];
-                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1..], new_val.?);
+                const new_leaf_rlp = try updMakeLeaf(alloc, remaining[cp + 1 ..], new_val.?);
                 children_enc[new_nib] = try updHashOrEmbedEx(alloc, new_leaf_rlp, extra);
             } else {
                 branch_val = new_val.?;
@@ -908,24 +1111,24 @@ fn updNodeEx(
 
 fn updResolveRef(ref: node.NodeRef, pool: []const []const u8) MptError![]const u8 {
     return switch (ref) {
-        .empty       => &.{0x80},
-        .hash        => |h| findNode(pool, h) orelse return error.InvalidProof,
+        .empty => &.{0x80},
+        .hash => |h| findNode(pool, h) orelse return error.InvalidProof,
         .inline_node => |b| b,
     };
 }
 
 fn updResolveRefEx(ref: node.NodeRef, pool: []const []const u8, extra_items: []const []const u8) MptError![]const u8 {
     return switch (ref) {
-        .empty       => &.{0x80},
-        .hash        => |h| findNode(pool, h) orelse findNode(extra_items, h) orelse return error.InvalidProof,
+        .empty => &.{0x80},
+        .hash => |h| findNode(pool, h) orelse findNode(extra_items, h) orelse return error.InvalidProof,
         .inline_node => |b| b,
     };
 }
 
 fn updRefEnc(alloc: std.mem.Allocator, ref: node.NodeRef) ![]const u8 {
     return switch (ref) {
-        .empty       => alloc.dupe(u8, &.{0x80}),
-        .hash        => |h| updRlpBytes(alloc, &h),
+        .empty => alloc.dupe(u8, &.{0x80}),
+        .hash => |h| updRlpBytes(alloc, &h),
         .inline_node => |b| b,
     };
 }
@@ -945,6 +1148,14 @@ fn updHashOrEmbedEx(alloc: std.mem.Allocator, node_rlp: []const u8, extra: *std.
     if (node_rlp.len < 32) return node_rlp;
     try extra.append(alloc, node_rlp);
     const h = keccak256(node_rlp);
+    return updRlpBytes(alloc, &h);
+}
+
+/// Like updHashOrEmbedEx but inserts the new node directly into the shared NodeIndex.
+fn updHashOrEmbedExIndexed(alloc: std.mem.Allocator, node_rlp: []const u8, index: *NodeIndex) ![]const u8 {
+    if (node_rlp.len < 32) return node_rlp;
+    const h = keccak256(node_rlp);
+    try index.put(h, node_rlp);
     return updRlpBytes(alloc, &h);
 }
 
@@ -996,11 +1207,14 @@ fn updRlpBytes(alloc: std.mem.Allocator, data: []const u8) ![]u8 {
     while (lv > 0) : (lv >>= 8) lc += 1;
     lv = data.len;
     var li = lc;
-    while (li > 0) : (li -= 1) { len_buf[li - 1] = @intCast(lv & 0xff); lv >>= 8; }
+    while (li > 0) : (li -= 1) {
+        len_buf[li - 1] = @intCast(lv & 0xff);
+        lv >>= 8;
+    }
     const out = try alloc.alloc(u8, 1 + lc + data.len);
     out[0] = @intCast(0xb7 + lc);
     @memcpy(out[1..][0..lc], len_buf[0..lc]);
-    @memcpy(out[1 + lc..], data);
+    @memcpy(out[1 + lc ..], data);
     return out;
 }
 
@@ -1011,7 +1225,10 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
         const out = try alloc.alloc(u8, 1 + total);
         out[0] = @intCast(0xc0 + total);
         var pos: usize = 1;
-        for (items) |item| { @memcpy(out[pos..][0..item.len], item); pos += item.len; }
+        for (items) |item| {
+            @memcpy(out[pos..][0..item.len], item);
+            pos += item.len;
+        }
         return out;
     }
     var len_buf: [8]u8 = undefined;
@@ -1020,11 +1237,17 @@ fn updRlpList(alloc: std.mem.Allocator, items: []const []const u8) ![]u8 {
     while (lv > 0) : (lv >>= 8) lc += 1;
     lv = total;
     var li = lc;
-    while (li > 0) : (li -= 1) { len_buf[li - 1] = @intCast(lv & 0xff); lv >>= 8; }
+    while (li > 0) : (li -= 1) {
+        len_buf[li - 1] = @intCast(lv & 0xff);
+        lv >>= 8;
+    }
     const out = try alloc.alloc(u8, 1 + lc + total);
     out[0] = @intCast(0xf7 + lc);
     @memcpy(out[1..][0..lc], len_buf[0..lc]);
     var pos: usize = 1 + lc;
-    for (items) |item| { @memcpy(out[pos..][0..item.len], item); pos += item.len; }
+    for (items) |item| {
+        @memcpy(out[pos..][0..item.len], item);
+        pos += item.len;
+    }
     return out;
 }

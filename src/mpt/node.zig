@@ -69,7 +69,7 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
             // 2-item node: leaf or extension distinguished by the HP flag bit.
             const key_bytes = switch (items[0]) {
                 .bytes => |b| b,
-                .list  => return error.InvalidNode,
+                .list => return error.InvalidNode,
             };
             if (key_bytes.len == 0) return error.InvalidNode;
 
@@ -79,13 +79,13 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
             if (is_leaf) {
                 const val_bytes: []const u8 = switch (items[1]) {
                     .bytes => |b| b,
-                    .list  => |l| l,
+                    .list => |l| l,
                 };
                 return .{ .leaf = .{ .key_end = key_bytes, .value = val_bytes } };
             } else {
                 return .{ .extension = .{
                     .prefix = key_bytes,
-                    .child  = try decodeNodeRef(items[1]),
+                    .child = try decodeNodeRef(items[1]),
                 } };
             }
         },
@@ -97,7 +97,7 @@ pub fn decodeNode(bytes: []const u8) error{ InvalidRlp, InvalidNode }!DecodedNod
             }
             const value: []const u8 = switch (items[16]) {
                 .bytes => |b| b,
-                .list  => &.{},
+                .list => &.{},
             };
             return .{ .branch = .{ .children = children, .value = value } };
         },

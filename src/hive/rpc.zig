@@ -67,7 +67,8 @@ fn handleConn(chain: *Chain, stream: std.net.Stream) !void {
 
     // Write HTTP 200 response
     var resp_buf: [4096]u8 = undefined;
-    const resp = std.fmt.bufPrint(&resp_buf,
+    const resp = std.fmt.bufPrint(
+        &resp_buf,
         "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{s}",
         .{ response_body.len, response_body },
     ) catch return;
@@ -75,18 +76,17 @@ fn handleConn(chain: *Chain, stream: std.net.Stream) !void {
 }
 
 fn processRpc(chain: *Chain, alloc: std.mem.Allocator, body: []const u8) []const u8 {
-
     const parsed = std.json.parseFromSlice(std.json.Value, alloc, body, .{}) catch
         return errorResponse("-32700", "Parse error");
     const root = switch (parsed.value) {
         .object => |o| o,
-        else    => return errorResponse("-32600", "Invalid Request"),
+        else => return errorResponse("-32600", "Invalid Request"),
     };
 
-    const id  = root.get("id")  orelse std.json.Value{ .integer = 0 };
+    const id = root.get("id") orelse std.json.Value{ .integer = 0 };
     const method = switch (root.get("method") orelse return errorResponse("-32600", "Missing method")) {
         .string => |s| s,
-        else    => return errorResponse("-32600", "Invalid method"),
+        else => return errorResponse("-32600", "Invalid method"),
     };
 
     const id_str = jsonValueToIdStr(alloc, id);
@@ -100,17 +100,18 @@ fn processRpc(chain: *Chain, alloc: std.mem.Allocator, body: []const u8) []const
     if (std.mem.eql(u8, method, "eth_getBlockByNumber")) {
         const params = switch (root.get("params") orelse return nullResponse(alloc, id_str)) {
             .array => |a| a,
-            else   => return nullResponse(alloc, id_str),
+            else => return nullResponse(alloc, id_str),
         };
         if (params.items.len == 0) return nullResponse(alloc, id_str);
 
         const tag = switch (params.items[0]) {
             .string => |s| s,
-            else    => return nullResponse(alloc, id_str),
+            else => return nullResponse(alloc, id_str),
         };
 
         const stored = resolveBlock(chain, tag) orelse return nullResponse(alloc, id_str);
-        const result = std.fmt.allocPrint(alloc,
+        const result = std.fmt.allocPrint(
+            alloc,
             "{{\"hash\":\"0x{x}\",\"number\":\"0x{x}\"}}",
             .{ stored.hash, stored.number },
         ) catch return "{}";
@@ -128,7 +129,9 @@ fn resolveBlock(chain: *Chain, tag: []const u8) ?@import("chain.zig").StoredHead
 
     // Hex block number
     const s = if (std.mem.startsWith(u8, tag, "0x") or std.mem.startsWith(u8, tag, "0X"))
-        tag[2..] else tag;
+        tag[2..]
+    else
+        tag;
     const n = std.fmt.parseInt(u64, s, 16) catch return null;
     return chain.getByNumber(n);
 }
@@ -136,14 +139,15 @@ fn resolveBlock(chain: *Chain, tag: []const u8) ?@import("chain.zig").StoredHead
 fn jsonValueToIdStr(alloc: std.mem.Allocator, id: std.json.Value) []const u8 {
     return switch (id) {
         .integer => |n| std.fmt.allocPrint(alloc, "{}", .{n}) catch "0",
-        .string  => |s| std.fmt.allocPrint(alloc, "\"{s}\"", .{s}) catch "\"\"",
-        .null    => "null",
-        else     => "0",
+        .string => |s| std.fmt.allocPrint(alloc, "\"{s}\"", .{s}) catch "\"\"",
+        .null => "null",
+        else => "0",
     };
 }
 
 fn buildResponse(alloc: std.mem.Allocator, id: []const u8, result: []const u8) []const u8 {
-    return std.fmt.allocPrint(alloc,
+    return std.fmt.allocPrint(
+        alloc,
         "{{\"jsonrpc\":\"2.0\",\"id\":{s},\"result\":{s}}}",
         .{ id, result },
     ) catch "{}";
@@ -158,7 +162,8 @@ fn errorResponse(code: []const u8, message: []const u8) []const u8 {
     const S = struct {
         var buf: [256]u8 = undefined;
     };
-    return std.fmt.bufPrint(&S.buf,
+    return std.fmt.bufPrint(
+        &S.buf,
         "{{\"jsonrpc\":\"2.0\",\"id\":null,\"error\":{{\"code\":{s},\"message\":\"{s}\"}}}}",
         .{ code, message },
     ) catch "{}";

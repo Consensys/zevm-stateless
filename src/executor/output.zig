@@ -73,7 +73,7 @@ pub fn computeReceiptsRoot(
 }
 
 /// stateRoot for stateless execution: applies account changes as MPT delta updates
-/// against `pre_state_root`, using `pool` (the witness node pool) to resolve existing nodes.
+/// against `pre_state_root`, using a pre-built NodeIndex for O(1) node lookups.
 ///
 /// This correctly handles a witness that only contains touched accounts — the untouched
 /// accounts remain implicit in the trie via their existing hash references.
@@ -81,11 +81,9 @@ pub fn computeStateRootDelta(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
     alloc_map: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
-    pool: []const []const u8,
+    index: *mpt.NodeIndex,
 ) ![32]u8 {
     var state_root = pre_state_root;
-    var extra = std.ArrayListUnmanaged([]const u8){};
-    defer extra.deinit(alloc);
 
     var it = alloc_map.iterator();
     while (it.next()) |entry| {
@@ -93,7 +91,7 @@ pub fn computeStateRootDelta(
         const acct = entry.value_ptr.*;
         const addr_key = mpt_builder.keccak256(&addr);
 
-        const storage_root = try computeStorageRoot(alloc, acct, pool);
+        const storage_root = try computeStorageRootIndexed(alloc, acct, index);
         const code_hash: [32]u8 = if (acct.code.len > 0)
             mpt_builder.keccak256(acct.code)
         else
@@ -108,7 +106,7 @@ pub fn computeStateRootDelta(
         else
             try encodeAccountRlp(alloc, acct.nonce, acct.balance, storage_root, code_hash);
 
-        try mpt.updateAccountChained(alloc, &state_root, addr_key, account_rlp, pool, &extra);
+        try mpt.updateAccountChainedIndexed(alloc, &state_root, addr_key, account_rlp, index);
     }
     return state_root;
 }
@@ -146,29 +144,28 @@ pub fn computeStateRoot(
     return mpt_builder.trieRoot(alloc, items);
 }
 
-fn computeStorageRoot(
+/// Indexed storage root: delta-updates via pre-built NodeIndex (O(1) pool lookups),
+/// falling through to scratch-build when no pre_storage_root is set.
+fn computeStorageRootIndexed(
     alloc: std.mem.Allocator,
     account: types.AllocAccount,
-    pool: []const []const u8,
+    index: *mpt.NodeIndex,
 ) ![32]u8 {
     if (account.pre_storage_root) |old_root| {
-        // Delta mode: apply each touched slot as an update to the proven pre-state root.
-        // Zero-valued entries indicate deletions; non-zero entries are insertions/updates.
-        // Use updateStorageChained so that multiple updates on the same account work
-        // correctly: new intermediate nodes are accumulated in `extra` and reused by
-        // subsequent updates within the same account.
         var root = old_root;
-        var extra = std.ArrayListUnmanaged([]const u8){};
-        defer extra.deinit(alloc);
         var it = account.storage.iterator();
         while (it.next()) |entry| {
             var slot_key: [32]u8 = undefined;
             std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
-            try mpt.updateStorageChained(alloc, &root, slot_key, entry.value_ptr.*, pool, &extra);
+            try mpt.updateStorageChainedIndexed(alloc, &root, slot_key, entry.value_ptr.*, index);
         }
         return root;
     }
-    // Scratch mode: build the storage trie from all non-zero slots.
+    return computeStorageRootScratch(alloc, account);
+}
+
+/// Scratch-build storage root from all non-zero slots (no witness pool needed).
+fn computeStorageRootScratch(alloc: std.mem.Allocator, account: types.AllocAccount) ![32]u8 {
     const storage = account.storage;
     const count = storage.count();
     if (count == 0) return mpt_builder.EMPTY_TRIE_HASH;
@@ -184,6 +181,27 @@ fn computeStorageRoot(
         i += 1;
     }
     return mpt_builder.trieRoot(alloc, items[0..i]);
+}
+
+/// Pool-based storage root: delta-updates via witness node pool (for legacy callers).
+fn computeStorageRoot(
+    alloc: std.mem.Allocator,
+    account: types.AllocAccount,
+    pool: []const []const u8,
+) ![32]u8 {
+    if (account.pre_storage_root) |old_root| {
+        var root = old_root;
+        var extra = std.ArrayListUnmanaged([]const u8){};
+        defer extra.deinit(alloc);
+        var it = account.storage.iterator();
+        while (it.next()) |entry| {
+            var slot_key: [32]u8 = undefined;
+            std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
+            try mpt.updateStorageChained(alloc, &root, slot_key, entry.value_ptr.*, pool, &extra);
+        }
+        return root;
+    }
+    return computeStorageRootScratch(alloc, account);
 }
 
 fn encodeAccountRlp(

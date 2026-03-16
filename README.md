@@ -64,12 +64,7 @@ Phase 1  MPT proof verification
   OK     root = 0x79f54cce9fd251fcc39c727b5db2d0fa94f7b76782be5cdf8336bd5cae24e609
          81 node(s) in pool, 117 key(s) verified
 
-Phase 2  WitnessDatabase queries
-  0xf93ee4cf...  nonce=0  balance=1000...  type=EOA  code_hash=0xc5d246...  storage_root=0x56e81f...
-  0x0000f908...  nonce=1  balance=0        type=contract  code_hash=0x6e49e6...  storage_root=0x56e81f...
-  ...
-
-Phase 3  Block execution
+Phase 2  Block execution
   block env
     number      = 1
     coinbase    = 0x8943545177806ed17b9f23f0a21ee5948ecaa776

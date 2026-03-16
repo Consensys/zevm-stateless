@@ -12,9 +12,9 @@
 //! block.json format: {"block":"0x<rlp_hex>"} — a post-Shanghai block whose
 //! header stateRoot is set to the computed trie root.
 
-const std        = @import("std");
+const std = @import("std");
 const primitives = @import("primitives");
-const mpt        = @import("mpt");
+const mpt = @import("mpt");
 
 // ─── Known constants ───────────────────────────────────────────────────────────
 
@@ -47,23 +47,31 @@ const SHA3_EMPTY_LIST: primitives.Hash = .{
 fn encBytes(buf: []u8, off: usize, data: []const u8) usize {
     var o = off;
     if (data.len == 0) {
-        buf[o] = 0x80; return o + 1;
+        buf[o] = 0x80;
+        return o + 1;
     } else if (data.len == 1 and data[0] <= 0x7f) {
-        buf[o] = data[0]; return o + 1;
+        buf[o] = data[0];
+        return o + 1;
     } else if (data.len <= 55) {
-        buf[o] = @intCast(0x80 + data.len); o += 1;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        buf[o] = @intCast(0x80 + data.len);
+        o += 1;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     } else if (data.len <= 0xff) {
         // 1-byte length
-        buf[o] = 0xb8; buf[o + 1] = @intCast(data.len); o += 2;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        buf[o] = 0xb8;
+        buf[o + 1] = @intCast(data.len);
+        o += 2;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     } else {
         // 2-byte length (covers 256–65535 bytes; logsBloom = 256 bytes lands here)
         buf[o] = 0xb9;
         buf[o + 1] = @intCast((data.len >> 8) & 0xff);
         buf[o + 2] = @intCast(data.len & 0xff);
         o += 3;
-        @memcpy(buf[o..][0..data.len], data); return o + data.len;
+        @memcpy(buf[o..][0..data.len], data);
+        return o + data.len;
     }
 }
 
@@ -72,9 +80,12 @@ fn encBytes(buf: []u8, off: usize, data: []const u8) usize {
 fn encList(buf: []u8, off: usize, payload: []const u8) usize {
     var o = off;
     if (payload.len <= 55) {
-        buf[o] = @intCast(0xc0 + payload.len); o += 1;
+        buf[o] = @intCast(0xc0 + payload.len);
+        o += 1;
     } else if (payload.len <= 0xff) {
-        buf[o] = 0xf8; buf[o + 1] = @intCast(payload.len); o += 2;
+        buf[o] = 0xf8;
+        buf[o + 1] = @intCast(payload.len);
+        o += 2;
     } else {
         buf[o] = 0xf9;
         buf[o + 1] = @intCast((payload.len >> 8) & 0xff);
@@ -87,33 +98,63 @@ fn encList(buf: []u8, off: usize, payload: []const u8) usize {
 
 /// Encode a uint64 as a minimal big-endian RLP integer (no leading zeros).
 fn encUint(buf: []u8, off: usize, val: u64) usize {
-    if (val == 0) { buf[off] = 0x80; return off + 1; }
+    if (val == 0) {
+        buf[off] = 0x80;
+        return off + 1;
+    }
     var tmp: [8]u8 = undefined;
     var v = val;
     var nb: usize = 0;
-    while (v > 0) : (nb += 1) { tmp[7 - nb] = @intCast(v & 0xff); v >>= 8; }
+    while (v > 0) : (nb += 1) {
+        tmp[7 - nb] = @intCast(v & 0xff);
+        v >>= 8;
+    }
     return encBytes(buf, off, tmp[8 - nb ..]);
 }
 
 fn buildAccountRlp(
     buf: []u8,
-    nonce: u64, balance: u256,
-    storage_root: primitives.Hash, code_hash: primitives.Hash,
+    nonce: u64,
+    balance: u256,
+    storage_root: primitives.Hash,
+    code_hash: primitives.Hash,
 ) usize {
     var payload: [200]u8 = undefined;
     var pl: usize = 0;
-    if (nonce == 0) { payload[pl] = 0x80; pl += 1; } else {
-        var tmp: [8]u8 = undefined; var n = nonce; var nb: usize = 0;
-        while (n > 0) : (nb += 1) { tmp[7 - nb] = @intCast(n & 0xff); n >>= 8; }
+    if (nonce == 0) {
+        payload[pl] = 0x80;
+        pl += 1;
+    } else {
+        var tmp: [8]u8 = undefined;
+        var n = nonce;
+        var nb: usize = 0;
+        while (n > 0) : (nb += 1) {
+            tmp[7 - nb] = @intCast(n & 0xff);
+            n >>= 8;
+        }
         pl = encBytes(&payload, pl, tmp[8 - nb ..]);
     }
-    if (balance == 0) { payload[pl] = 0x80; pl += 1; } else {
-        var tmp: [32]u8 = undefined; var b = balance; var nb: usize = 0;
-        while (b > 0) : (nb += 1) { tmp[31 - nb] = @intCast(b & 0xff); b >>= 8; }
+    if (balance == 0) {
+        payload[pl] = 0x80;
+        pl += 1;
+    } else {
+        var tmp: [32]u8 = undefined;
+        var b = balance;
+        var nb: usize = 0;
+        while (b > 0) : (nb += 1) {
+            tmp[31 - nb] = @intCast(b & 0xff);
+            b >>= 8;
+        }
         pl = encBytes(&payload, pl, tmp[32 - nb ..]);
     }
-    payload[pl] = 0xa0; pl += 1; @memcpy(payload[pl..][0..32], &storage_root); pl += 32;
-    payload[pl] = 0xa0; pl += 1; @memcpy(payload[pl..][0..32], &code_hash);    pl += 32;
+    payload[pl] = 0xa0;
+    pl += 1;
+    @memcpy(payload[pl..][0..32], &storage_root);
+    pl += 32;
+    payload[pl] = 0xa0;
+    pl += 1;
+    @memcpy(payload[pl..][0..32], &code_hash);
+    pl += 32;
     return encList(buf, 0, payload[0..pl]);
 }
 
@@ -157,36 +198,41 @@ fn buildLeafNode(buf: []u8, key_hash: primitives.Hash, value: []const u8) usize 
 ///  19  parentBeaconBlockRoot: [0; 32] (EIP-4788)
 ///  20  requestsHash:          [0; 32] (EIP-7685)
 fn buildBlockRlp(buf: []u8, state_root: primitives.Hash) usize {
-    const zero32:  [32]u8  = @splat(0x00);
-    const zero20:  [20]u8  = @splat(0x00);
-    const zero8:   [8]u8   = @splat(0x00);
+    const zero32: [32]u8 = @splat(0x00);
+    const zero20: [20]u8 = @splat(0x00);
+    const zero8: [8]u8 = @splat(0x00);
     const zero256: [256]u8 = @splat(0x00);
 
     // ── Build header payload ─────────────────────────────────────────────────
     var hdr_payload: [900]u8 = undefined;
     var hp: usize = 0;
 
-    hp = encBytes(&hdr_payload, hp, &zero32);          // 0:  parentHash
+    hp = encBytes(&hdr_payload, hp, &zero32); // 0:  parentHash
     hp = encBytes(&hdr_payload, hp, &SHA3_EMPTY_LIST); // 1:  sha3Uncles
-    hp = encBytes(&hdr_payload, hp, &zero20);          // 2:  coinbase
-    hp = encBytes(&hdr_payload, hp, &state_root);      // 3:  stateRoot
+    hp = encBytes(&hdr_payload, hp, &zero20); // 2:  coinbase
+    hp = encBytes(&hdr_payload, hp, &state_root); // 3:  stateRoot
     hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 4:  transactionsRoot
     hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 5:  receiptsRoot
-    hp = encBytes(&hdr_payload, hp, &zero256);         // 6:  logsBloom (256 bytes)
-    hdr_payload[hp] = 0x80; hp += 1;                  // 7:  difficulty = 0
-    hp = encUint(&hdr_payload, hp, 1);                 // 8:  number = 1
-    hp = encUint(&hdr_payload, hp, 30_000_000);        // 9:  gasLimit
-    hdr_payload[hp] = 0x80; hp += 1;                  // 10: gasUsed = 0
-    hp = encUint(&hdr_payload, hp, 1);                 // 11: timestamp = 1
-    hdr_payload[hp] = 0x80; hp += 1;                  // 12: extraData = []
-    hp = encBytes(&hdr_payload, hp, &zero32);          // 13: mixHash (prevRandao)
-    hp = encBytes(&hdr_payload, hp, &zero8);           // 14: nonce = 0
-    hp = encUint(&hdr_payload, hp, 7);                 // 15: baseFeePerGas = 7
+    hp = encBytes(&hdr_payload, hp, &zero256); // 6:  logsBloom (256 bytes)
+    hdr_payload[hp] = 0x80;
+    hp += 1; // 7:  difficulty = 0
+    hp = encUint(&hdr_payload, hp, 1); // 8:  number = 1
+    hp = encUint(&hdr_payload, hp, 30_000_000); // 9:  gasLimit
+    hdr_payload[hp] = 0x80;
+    hp += 1; // 10: gasUsed = 0
+    hp = encUint(&hdr_payload, hp, 1); // 11: timestamp = 1
+    hdr_payload[hp] = 0x80;
+    hp += 1; // 12: extraData = []
+    hp = encBytes(&hdr_payload, hp, &zero32); // 13: mixHash (prevRandao)
+    hp = encBytes(&hdr_payload, hp, &zero8); // 14: nonce = 0
+    hp = encUint(&hdr_payload, hp, 7); // 15: baseFeePerGas = 7
     hp = encBytes(&hdr_payload, hp, &EMPTY_TRIE_HASH); // 16: withdrawalsRoot
-    hdr_payload[hp] = 0x80; hp += 1;                  // 17: blobGasUsed = 0
-    hdr_payload[hp] = 0x80; hp += 1;                  // 18: excessBlobGas = 0
-    hp = encBytes(&hdr_payload, hp, &zero32);          // 19: parentBeaconBlockRoot
-    hp = encBytes(&hdr_payload, hp, &zero32);          // 20: requestsHash
+    hdr_payload[hp] = 0x80;
+    hp += 1; // 17: blobGasUsed = 0
+    hdr_payload[hp] = 0x80;
+    hp += 1; // 18: excessBlobGas = 0
+    hp = encBytes(&hdr_payload, hp, &zero32); // 19: parentBeaconBlockRoot
+    hp = encBytes(&hdr_payload, hp, &zero32); // 20: requestsHash
 
     var hdr_buf: [1000]u8 = undefined;
     const hdr_len = encList(&hdr_buf, 0, hdr_payload[0..hp]);
@@ -197,9 +243,12 @@ fn buildBlockRlp(buf: []u8, state_root: primitives.Hash) usize {
 
     @memcpy(block_payload[bp..][0..hdr_len], hdr_buf[0..hdr_len]);
     bp += hdr_len;
-    block_payload[bp] = 0xc0; bp += 1; // transactions: empty list
-    block_payload[bp] = 0xc0; bp += 1; // uncles: empty list
-    block_payload[bp] = 0xc0; bp += 1; // withdrawals: empty list
+    block_payload[bp] = 0xc0;
+    bp += 1; // transactions: empty list
+    block_payload[bp] = 0xc0;
+    bp += 1; // uncles: empty list
+    block_payload[bp] = 0xc0;
+    bp += 1; // withdrawals: empty list
 
     return encList(buf, 0, block_payload[0..bp]);
 }
@@ -219,7 +268,11 @@ pub fn main() !void {
 
     var account_rlp: [200]u8 = undefined;
     const account_len = buildAccountRlp(
-        &account_rlp, 5, 1_000_000_000, EMPTY_TRIE_HASH, KECCAK_EMPTY,
+        &account_rlp,
+        5,
+        1_000_000_000,
+        EMPTY_TRIE_HASH,
+        KECCAK_EMPTY,
     );
 
     var leaf_node: [512]u8 = undefined;
@@ -260,7 +313,7 @@ pub fn main() !void {
 
     std.debug.print("Generated examples/block.json and examples/witness.json\n", .{});
     std.debug.print("  address:    0x{x}\n", .{address});
-    std.debug.print("  nonce:      5\n",     .{});
+    std.debug.print("  nonce:      5\n", .{});
     std.debug.print("  balance:    1000000000\n", .{});
     std.debug.print("  state root: 0x{x}\n", .{state_root});
     std.debug.print("  block RLP:  {} bytes\n", .{block_rlp_len});
