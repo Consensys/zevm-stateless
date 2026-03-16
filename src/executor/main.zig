@@ -17,7 +17,7 @@ const mpt        = @import("mpt");
 
 const transition_mod = @import("executor_transition");
 const output_mod     = @import("executor_output");
-const fork_mod       = @import("executor_fork");
+const fork_mod       = @import("hardfork");
 const tx_decode      = @import("executor_tx_decode");
 const types          = @import("executor_types");
 
@@ -141,7 +141,7 @@ pub fn executeBlock(
 
     // 4. Build Env from the block header.
     const header = stateless_input.block;
-    const spec = if (fork_name) |name| (fork_mod.specFromName(name) orelse fork_mod.mainnetSpec(header.number, header.timestamp)) else fork_mod.mainnetSpec(header.number, header.timestamp);
+    const spec = if (fork_name) |name| (fork_mod.specFromFork(name) orelse fork_mod.mainnetSpec(header.number, header.timestamp)) else fork_mod.mainnetSpec(header.number, header.timestamp);
 
     // Map input.Withdrawal → types.Withdrawal.
     const withdrawals = try alloc.alloc(types.Withdrawal, stateless_input.withdrawals.len);

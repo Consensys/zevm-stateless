@@ -340,13 +340,14 @@ pub fn build(b: *std.Build) void {
     native_executor_output_mod.addImport("mpt_builder",          mpt_builder_mod);
     native_executor_output_mod.addImport("mpt",                  mpt_mod);
 
-    // executor_fork — mainnet hardfork schedule (block/timestamp → SpecId + reward)
-    const executor_fork_mod = b.createModule(.{
-        .root_source_file = b.path("src/executor/fork.zig"),
+    // hardfork — single source of truth for fork names, SpecId mapping,
+    // mainnet activation schedule, and block rewards (declared early; used widely)
+    const hardfork_mod = b.createModule(.{
+        .root_source_file = b.path("src/hardfork.zig"),
         .target = target,
         .optimize = optimize,
     });
-    executor_fork_mod.addImport("primitives", primitives);
+    hardfork_mod.addImport("primitives", primitives);
 
     // native_executor_tx_decode — raw RLP tx bytes → TxInput, or input.Transaction → TxInput
     const native_executor_tx_decode_mod = b.createModule(.{
@@ -366,8 +367,9 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
     executor_mod.addImport("executor_transition", native_executor_transition_mod);
     executor_mod.addImport("executor_output",     native_executor_output_mod);
-    executor_mod.addImport("executor_fork",       executor_fork_mod);
+    executor_mod.addImport("hardfork",            hardfork_mod);
     executor_mod.addImport("executor_tx_decode",  native_executor_tx_decode_mod);
+
 
     // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
     const t8n_input_mod = b.createModule(.{
@@ -395,6 +397,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "executor_types",      .module = executor_types_mod             },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
                 .{ .name = "executor_output",     .module = native_executor_output_mod     },
+                .{ .name = "hardfork",            .module = hardfork_mod                   },
             },
         }),
     });
@@ -448,6 +451,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
                 .{ .name = "executor_output",     .module = native_executor_output_mod     },
                 .{ .name = "t8n_input",           .module = t8n_input_mod                  },
+                .{ .name = "hardfork",            .module = hardfork_mod                   },
             },
         }),
     });
@@ -489,9 +493,9 @@ pub fn build(b: *std.Build) void {
     blockchain_test_runner_mod.addImport("executor_types",       executor_types_mod);
     blockchain_test_runner_mod.addImport("executor_transition",  native_executor_transition_mod);
     blockchain_test_runner_mod.addImport("executor_output",      native_executor_output_mod);
-    blockchain_test_runner_mod.addImport("executor_fork",        executor_fork_mod);
     blockchain_test_runner_mod.addImport("executor_tx_decode",   native_executor_tx_decode_mod);
     blockchain_test_runner_mod.addImport("mpt",                  mpt_mod);
+    blockchain_test_runner_mod.addImport("hardfork",             hardfork_mod);
 
     const bc_test_exe = b.addExecutable(.{
         .name = "blockchain-test-runner",
@@ -585,7 +589,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod        },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
                 .{ .name = "executor_output",     .module = native_executor_output_mod     },
-                .{ .name = "executor_fork",       .module = executor_fork_mod              },
+                .{ .name = "hardfork",            .module = hardfork_mod              },
                 .{ .name = "executor_tx_decode",  .module = native_executor_tx_decode_mod  },
             },
         }),

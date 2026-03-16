@@ -9,13 +9,13 @@
 ///
 /// Multi-block fixtures (blocks.len != 1) are skipped.
 const std = @import("std");
-const primitives         = @import("primitives");
-const executor_types     = @import("executor_types");
+const primitives          = @import("primitives");
+const hardfork            = @import("hardfork");
+const executor_types      = @import("executor_types");
 const executor_transition = @import("executor_transition");
-const executor_output    = @import("executor_output");
-const executor_fork      = @import("executor_fork");
-const executor_tx_decode = @import("executor_tx_decode");
-const mpt                = @import("mpt");
+const executor_output     = @import("executor_output");
+const executor_tx_decode  = @import("executor_tx_decode");
+const mpt                 = @import("mpt");
 
 const Address = executor_types.Address;
 const Hash    = executor_types.Hash;
@@ -102,16 +102,23 @@ pub fn runFixture(
             break :blk hexToHash(switch (lv) { .string => |s| s, else => "" }) catch [_]u8{0} ** 32;
         };
 
-        // Chain id from config (default 1 = mainnet).
+        // Chain id and blobSchedule from config.
         const fixture_chain_id: u64 = blk: {
             const cv = test_obj.get("config") orelse break :blk 1;
             const co = switch (cv) { .object => |o| o, else => break :blk 1 };
             const v = co.get("chainid") orelse break :blk 1;
             break :blk jsonU64(v) catch 1;
         };
+        const blob_schedule: ?std.json.ObjectMap = blk: {
+            const cv = test_obj.get("config") orelse break :blk null;
+            const co = switch (cv) { .object => |o| o, else => break :blk null };
+            const bsv = co.get("blobSchedule") orelse break :blk null;
+            break :blk switch (bsv) { .object => |o| o, else => null };
+        };
 
         // Decode SpecId from network string.
-        const spec = networkToSpec(network) orelse {
+        // For transition forks, use the post-transition spec as the fixture-level default.
+        const spec = hardfork.specForBlock(network, std.math.maxInt(u64)) orelse {
             if (!quiet) std.debug.print("SKIP {s}/{s} (unknown network: {s})\n", .{ rel_path, test_name, network });
             stats.skipped += 1;
             continue;
@@ -162,7 +169,8 @@ pub fn runFixture(
             const raw_txs     = decodeTxsFromBlock(alloc, block_bytes) catch continue;
 
             // Build execution environment from blockHeader + accumulated block hashes.
-            const env = buildEnv(alloc, bh, block, block_hashes_list.items) catch continue;
+            var env = buildEnv(alloc, bh, block, block_hashes_list.items) catch continue;
+            env.blob_base_fee_update_fraction = blobFractionForBlock(blob_schedule, network, env.timestamp);
 
             // Decode transactions.
             const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
@@ -173,9 +181,11 @@ pub fn runFixture(
             };
 
             // Execute the block. An execution error means the block is invalid — freeze state.
-            const reward = executor_fork.blockReward(spec);
+            // For transition forks, select the spec appropriate for this block's timestamp.
+            const block_spec = hardfork.specForBlock(network, env.timestamp) orelse spec;
+            const reward = hardfork.blockReward(block_spec);
             const result = executor_transition.transition(
-                alloc, chain_alloc, env, txs, spec, fixture_chain_id, reward,
+                alloc, chain_alloc, env, txs, block_spec, fixture_chain_id, reward,
             ) catch continue;
 
             // Compute post-state root.
@@ -367,33 +377,16 @@ fn parseAllocFromValue(alloc: std.mem.Allocator, val: std.json.Value) !AllocMap 
     return map;
 }
 
-// ─── Fork mapping ─────────────────────────────────────────────────────────────
+// ─── Blob schedule helpers ────────────────────────────────────────────────────
 
-fn networkToSpec(network: []const u8) ?primitives.SpecId {
-    if (std.mem.eql(u8, network, "Cancun"))          return .cancun;
-    if (std.mem.eql(u8, network, "Prague"))          return .prague;
-    if (std.mem.eql(u8, network, "Osaka"))           return .osaka;
-    if (std.mem.eql(u8, network, "Shanghai"))        return .shanghai;
-    if (std.mem.eql(u8, network, "Paris"))           return .merge;
-    if (std.mem.eql(u8, network, "Merge"))           return .merge;
-    if (std.mem.eql(u8, network, "GrayGlacier"))     return .gray_glacier;
-    if (std.mem.eql(u8, network, "ArrowGlacier"))    return .arrow_glacier;
-    if (std.mem.eql(u8, network, "London"))          return .london;
-    if (std.mem.eql(u8, network, "Berlin"))          return .berlin;
-    if (std.mem.eql(u8, network, "MuirGlacier"))     return .muir_glacier;
-    if (std.mem.eql(u8, network, "Istanbul"))        return .istanbul;
-    if (std.mem.eql(u8, network, "Constantinople"))  return .petersburg;
-    if (std.mem.eql(u8, network, "Petersburg"))      return .petersburg;
-    if (std.mem.eql(u8, network, "Byzantium"))       return .byzantium;
-    if (std.mem.eql(u8, network, "SpuriousDragon"))  return .spurious_dragon;
-    if (std.mem.eql(u8, network, "EIP158"))          return .spurious_dragon;
-    if (std.mem.eql(u8, network, "TangerineWhistle"))return .tangerine;
-    if (std.mem.eql(u8, network, "EIP150"))          return .tangerine;
-    if (std.mem.eql(u8, network, "Dao"))             return .dao_fork;
-    if (std.mem.eql(u8, network, "HomesteadToDaoAt5")) return .dao_fork;
-    if (std.mem.eql(u8, network, "Homestead"))       return .homestead;
-    if (std.mem.eql(u8, network, "Frontier"))        return .frontier;
-    return null;
+/// Look up baseFeeUpdateFraction from a fixture's blobSchedule for this block.
+fn blobFractionForBlock(blob_schedule: ?std.json.ObjectMap, network: []const u8, timestamp: u64) ?u64 {
+    const bs = blob_schedule orelse return null;
+    const fork_name = hardfork.activeForkName(network, timestamp);
+    const fork_entry = bs.get(fork_name) orelse return null;
+    const entry_obj = switch (fork_entry) { .object => |o| o, else => return null };
+    const fraction_val = entry_obj.get("baseFeeUpdateFraction") orelse return null;
+    return jsonU64(fraction_val) catch null;
 }
 
 // ─── Hex / JSON helpers ───────────────────────────────────────────────────────

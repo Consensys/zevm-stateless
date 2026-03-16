@@ -56,41 +56,6 @@ const DUMMY_BLOCK_HASH: input.Hash = blk: {
     break :blk h;
 };
 
-// ─── Fork mapping ─────────────────────────────────────────────────────────────
-
-pub fn specFromFork(name: []const u8) ?primitives.SpecId {
-    const Entry = struct { k: []const u8, v: primitives.SpecId };
-    const table = [_]Entry{
-        .{ .k = "Frontier", .v = .frontier },
-        .{ .k = "Homestead", .v = .homestead },
-        .{ .k = "EIP150", .v = .tangerine },
-        .{ .k = "TangerineWhistle", .v = .tangerine },
-        .{ .k = "EIP158", .v = .spurious_dragon },
-        .{ .k = "SpuriousDragon", .v = .spurious_dragon },
-        .{ .k = "Byzantium", .v = .byzantium },
-        .{ .k = "Constantinople", .v = .constantinople },
-        .{ .k = "ConstantinopleFix", .v = .petersburg },
-        .{ .k = "Petersburg", .v = .petersburg },
-        .{ .k = "Istanbul", .v = .istanbul },
-        .{ .k = "MuirGlacier", .v = .muir_glacier },
-        .{ .k = "Berlin", .v = .berlin },
-        .{ .k = "London", .v = .london },
-        .{ .k = "ArrowGlacier", .v = .arrow_glacier },
-        .{ .k = "GrayGlacier", .v = .gray_glacier },
-        .{ .k = "Merge", .v = .merge },
-        .{ .k = "Paris", .v = .merge },
-        .{ .k = "Shanghai", .v = .shanghai },
-        .{ .k = "Cancun", .v = .cancun },
-        .{ .k = "Prague", .v = .prague },
-        .{ .k = "Osaka", .v = .osaka },
-        .{ .k = "Amsterdam", .v = .amsterdam },
-    };
-    for (table) |e| {
-        if (std.mem.eql(u8, name, e.k)) return e.v;
-    }
-    return null;
-}
-
 // ─── Transaction hashing and sender recovery ──────────────────────────────────
 
 /// Encode an access list to RLP (for typed tx hashing).
@@ -508,6 +473,15 @@ fn buildDb(
 
 // ─── Context setup ────────────────────────────────────────────────────────────
 
+/// Returns the blob base fee update fraction for a given spec.
+/// Used as fallback when env.blob_base_fee_update_fraction is not set.
+fn blobFractionForSpec(spec: primitives.SpecId) u64 {
+    if (primitives.isEnabledIn(spec, .bpo2)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_BPO2;
+    if (primitives.isEnabledIn(spec, .bpo1)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_BPO1;
+    if (primitives.isEnabledIn(spec, .prague)) return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_OSAKA;
+    return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN;
+}
+
 fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
     var block = context_mod.BlockEnv.default();
     block.number = @as(primitives.U256, env.number);
@@ -519,11 +493,8 @@ fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
     block.prevrandao = env.random;
     // Blob gas — compute blob_gasprice via fake_exponential, not hardcode 1
     if (env.excess_blob_gas) |ebg| {
-        // EIP-7691 (Prague+): use updated fraction 5007716; Cancun and below use 3338477
-        const fraction = if (primitives.isEnabledIn(spec, .prague))
-            primitives.BLOB_BASE_FEE_UPDATE_FRACTION_OSAKA
-        else
-            primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE;
+        // Use fixture-provided fraction if present, otherwise derive from spec.
+        const fraction = env.blob_base_fee_update_fraction orelse blobFractionForSpec(spec);
         block.setBlobExcessGasAndPrice(ebg, fraction);
     }
     return block;
@@ -555,6 +526,7 @@ pub fn transition(
     // ── EIP-4788: apply beacon block root system call pre-state (Cancun+) ────
     // Mutate a mutable copy of pre_alloc to store (timestamp, root) in the
     // beacon roots contract storage before building the DB.
+    // Per spec: if the contract has no code the call is a no-op.
     var pre_alloc = pre_alloc_in;
     if (primitives.isEnabledIn(spec, .cancun)) {
         if (env.parent_beacon_block_root) |root| {
@@ -562,22 +534,27 @@ pub fn transition(
                 0x00, 0x0F, 0x3d, 0xf6, 0xD7, 0x32, 0x80, 0x7E, 0xf1, 0x31,
                 0x9f, 0xB7, 0xB8, 0xBb, 0x85, 0x22, 0xd0, 0xBe, 0xac, 0x02,
             };
-            const HISTORY_BUFFER_LENGTH: u256 = 8191;
-            const ts: u256 = env.timestamp;
-            const ts_idx = ts % HISTORY_BUFFER_LENGTH;
-            const root_idx = ts_idx + HISTORY_BUFFER_LENGTH;
-            var root_val: u256 = 0;
-            for (root) |b| root_val = (root_val << 8) | b;
-
-            const entry = try pre_alloc.getOrPut(arena, BEACON_ROOTS_ADDRESS);
-            if (!entry.found_existing) entry.value_ptr.* = .{};
-            try entry.value_ptr.*.storage.put(arena, ts_idx,   ts);
-            try entry.value_ptr.*.storage.put(arena, root_idx, root_val);
+            const acct = pre_alloc.get(BEACON_ROOTS_ADDRESS);
+            if (acct != null and acct.?.code.len > 0) {
+                const HISTORY_BUFFER_LENGTH: u256 = 8191;
+                const ts: u256 = env.timestamp;
+                const ts_idx = ts % HISTORY_BUFFER_LENGTH;
+                const root_idx = ts_idx + HISTORY_BUFFER_LENGTH;
+                var root_val: u256 = 0;
+                for (root) |b| root_val = (root_val << 8) | b;
+                const entry = try pre_alloc.getOrPut(arena, BEACON_ROOTS_ADDRESS);
+                try entry.value_ptr.*.storage.put(arena, ts_idx,   ts);
+                try entry.value_ptr.*.storage.put(arena, root_idx, root_val);
+            }
         }
     }
 
-    // ── EIP-2935: apply block hash history contract system call (Prague+) ──────
-    // At the start of each block, store parent_hash at slot (block_number - 1) % 8192.
+    // ── EIP-2935: pre-block history storage write (Prague+) ──────────────────
+    // Write parent_hash to slot (block_number - 1) % 8192 of the history
+    // storage contract BEFORE building the DB so that the EVM can read the
+    // stored hashes via SLOAD during contract calls.
+    // Writing storage only (no code) keeps the account as "empty-code", so a
+    // user CREATE at the same address can still succeed (code_hash == KECCAK_EMPTY).
     if (primitives.isEnabledIn(spec, .prague)) {
         if (env.parent_hash) |parent_hash| {
             const HISTORY_STORAGE_ADDRESS: input.Address = .{
@@ -613,6 +590,19 @@ pub fn transition(
     var block_bloom = bloom.ZERO;
     var total_blob_gas: u64 = 0;
     var log_index_global: u64 = 0;
+
+    // Per-block blob gas limit (EIP-4844 / EIP-7691 / BPO forks).
+    // A block whose total blob gas exceeds this limit is invalid.
+    const max_blob_gas_per_block: u64 = if (!primitives.isEnabledIn(spec, .cancun))
+        0
+    else if (primitives.isEnabledIn(spec, .bpo2))
+        primitives.MAX_BLOB_NUMBER_PER_BLOCK_BPO2 * primitives.GAS_PER_BLOB
+    else if (primitives.isEnabledIn(spec, .bpo1))
+        primitives.MAX_BLOB_NUMBER_PER_BLOCK_BPO1 * primitives.GAS_PER_BLOB
+    else if (primitives.isEnabledIn(spec, .prague))
+        primitives.MAX_BLOB_NUMBER_PER_BLOCK_PRAGUE * primitives.GAS_PER_BLOB
+    else
+        primitives.MAX_BLOB_NUMBER_PER_BLOCK * primitives.GAS_PER_BLOB;
 
     // ── Execute each transaction ──────────────────────────────────────────────
     for (txs, 0..) |*tx, tx_idx| {
@@ -930,10 +920,20 @@ pub fn transition(
         }
         _ = logs_start;
 
-        // Blob gas tracking
+        // Blob gas tracking + per-block limit enforcement.
+        // Only reject at the block level when the tx is individually within limits
+        // but the cumulative total would overflow the block cap.
+        // Txs that exceed the per-tx limit are rejected by zevm's validateBlobTx.
         if (tx.type == 3) {
             const blobs: u64 = @intCast(tx.blob_versioned_hashes.len);
-            total_blob_gas += blobs * 131_072; // GAS_PER_BLOB
+            const tx_blob_gas = blobs * primitives.GAS_PER_BLOB;
+            if (max_blob_gas_per_block > 0 and
+                tx_blob_gas <= max_blob_gas_per_block and
+                total_blob_gas + tx_blob_gas > max_blob_gas_per_block)
+            {
+                return error.BlobGasLimitExceeded;
+            }
+            total_blob_gas += tx_blob_gas;
         }
 
         try receipts.append(arena, Receipt{
