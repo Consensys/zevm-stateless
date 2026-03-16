@@ -33,7 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .zevm = .{
-            .url = "https://github.com/Consensys/zevm/archive/44810d379d51f88797a5184b20c87037b7e07e45.tar.gz",
+            .url = "https://github.com/Consensys/zevm/archive/refs/tags/v0.5.2-consensys.tar.gz",
             .hash = "zevm-0.4.0-HzrXkhqIEQBgCTMqDryFEahHYzTSqlR6QreylxrJq6_d",
         },
     },
