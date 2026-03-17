@@ -7,14 +7,24 @@
 //!
 //! SSZ container layout for StatelessInput:
 //!
-//!   Fixed part (32 bytes total):
-//!     block_rlp    : offset (4 bytes LE)  — Bytes (raw block RLP)
-//!     state        : offset (4 bytes LE)  — List[Bytes]
-//!     codes        : offset (4 bytes LE)  — List[Bytes]
-//!     keys         : offset (4 bytes LE)  — List[Bytes]
-//!     headers      : offset (4 bytes LE)  — List[Bytes]
-//!     chain_id     : uint64 (8 bytes LE)  — inline fixed field
-//!     public_keys  : offset (4 bytes LE)  — List[Bytes]
+//! Two layouts are accepted, distinguished by the first offset value:
+//!
+//! 5-field layout (fixed part = 20 bytes, block_rlp_offset == 20):
+//!   block_rlp    : offset (4 bytes LE)
+//!   state        : offset (4 bytes LE)
+//!   codes        : offset (4 bytes LE)
+//!   keys         : offset (4 bytes LE)
+//!   headers      : offset (4 bytes LE)
+//!   chain_id defaults to 1, public_keys defaults to empty.
+//!
+//! 7-field layout (fixed part = 32 bytes, block_rlp_offset == 32):
+//!   block_rlp    : offset (4 bytes LE)
+//!   state        : offset (4 bytes LE)
+//!   codes        : offset (4 bytes LE)
+//!   keys         : offset (4 bytes LE)
+//!   headers      : offset (4 bytes LE)
+//!   chain_id     : uint64 (8 bytes LE)  — inline fixed field
+//!   public_keys  : offset (4 bytes LE)
 //!
 //!   Variable section (immediately after fixed part, offsets are absolute):
 //!     block_rlp data  [block_rlp_offset .. state_offset]
@@ -44,8 +54,10 @@ const rlp_decode = @import("rlp_decode");
 const json_mod = @import("json");
 const zkvm_io = @import("zkvm_io");
 
-// Fixed part: 5 variable offsets × 4 bytes + chain_id 8 bytes + 1 variable offset × 4 bytes = 32
-const FIXED_PART_SIZE: usize = 32;
+// 5-field layout: 5 variable offsets × 4 bytes = 20 bytes
+const FIXED_PART_5: usize = 5 * 4;
+// 7-field layout: 5 offsets × 4 + chain_id u64 + 1 offset × 4 = 32 bytes
+const FIXED_PART_7: usize = 5 * 4 + 8 + 4;
 
 // ── deserializeStatelessInput ─────────────────────────────────────────────────
 
@@ -56,7 +68,14 @@ pub fn deserializeStatelessInput(
     allocator: std.mem.Allocator,
     data: []const u8,
 ) !input_mod.StatelessInput {
-    if (data.len < FIXED_PART_SIZE) return error.UnexpectedEndOfInput;
+    if (data.len < FIXED_PART_5) return error.UnexpectedEndOfInput;
+
+    // Peek at the first offset to determine which container layout was used.
+    // In a valid SSZ container the first offset always equals the fixed part size.
+    const first_offset = std.mem.readInt(u32, data[0..4], .little);
+    const is_7_field = (first_offset == FIXED_PART_7);
+    if (first_offset != FIXED_PART_5 and first_offset != FIXED_PART_7)
+        return error.InvalidSszOffset;
 
     var pos: usize = 0;
     const block_rlp_offset = readU32Le(data, &pos);
@@ -64,12 +83,18 @@ pub fn deserializeStatelessInput(
     const codes_offset = readU32Le(data, &pos);
     const keys_offset = readU32Le(data, &pos);
     const headers_offset = readU32Le(data, &pos);
-    const chain_id = readU64Le(data, &pos);
-    const public_keys_offset = readU32Le(data, &pos);
+
+    var chain_id: u64 = 1;
+    var public_keys_offset: u32 = @intCast(data.len);
+
+    if (is_7_field) {
+        if (data.len < FIXED_PART_7) return error.UnexpectedEndOfInput;
+        chain_id = readU64Le(data, &pos);
+        public_keys_offset = readU32Le(data, &pos);
+    }
 
     // Validate offsets are within bounds and monotonically ordered.
-    if (block_rlp_offset < FIXED_PART_SIZE or
-        state_offset < block_rlp_offset or
+    if (state_offset < block_rlp_offset or
         codes_offset < state_offset or
         keys_offset < codes_offset or
         headers_offset < keys_offset or
@@ -89,7 +114,10 @@ pub fn deserializeStatelessInput(
     const codes = try readBytesList(allocator, data[codes_offset..keys_offset]);
     const keys = try readBytesList(allocator, data[keys_offset..headers_offset]);
     const headers = try readBytesList(allocator, data[headers_offset..public_keys_offset]);
-    const public_keys = try readBytesList(allocator, data[public_keys_offset..]);
+    const public_keys = if (is_7_field)
+        try readBytesList(allocator, data[public_keys_offset..])
+    else
+        &[_][]const u8{};
 
     var witness = input_mod.ExecutionWitness{
         .state_root = @splat(0),
