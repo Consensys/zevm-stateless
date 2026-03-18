@@ -91,7 +91,10 @@ pub fn computeStateRootDelta(
         const acct = entry.value_ptr.*;
         const addr_key = mpt_builder.keccak256(&addr);
 
-        const storage_root = try computeStorageRootIndexed(alloc, acct, index);
+        const storage_root = computeStorageRootIndexed(alloc, acct, index) catch |err| {
+            std.debug.print("proof error: storage root for 0x{s}: {}\n", .{ std.fmt.bytesToHex(addr, .lower), err });
+            return err;
+        };
         const code_hash: [32]u8 = if (acct.code.len > 0)
             mpt_builder.keccak256(acct.code)
         else
@@ -106,7 +109,12 @@ pub fn computeStateRootDelta(
         else
             try encodeAccountRlp(alloc, acct.nonce, acct.balance, storage_root, code_hash);
 
-        try mpt.updateAccountChainedIndexed(alloc, &state_root, addr_key, account_rlp, index);
+        mpt.updateAccountChainedIndexed(alloc, &state_root, addr_key, account_rlp, index) catch |err| {
+            std.debug.print("proof error: account trie update for 0x{s} (nonce={d} balance={d}): {}\n", .{
+                std.fmt.bytesToHex(addr, .lower), acct.nonce, acct.balance, err,
+            });
+            return err;
+        };
     }
     return state_root;
 }
@@ -157,7 +165,10 @@ fn computeStorageRootIndexed(
         while (it.next()) |entry| {
             var slot_key: [32]u8 = undefined;
             std.mem.writeInt(u256, &slot_key, entry.key_ptr.*, .big);
-            try mpt.updateStorageChainedIndexed(alloc, &root, slot_key, entry.value_ptr.*, index);
+            mpt.updateStorageChainedIndexed(alloc, &root, slot_key, entry.value_ptr.*, index) catch |err| {
+                std.debug.print("proof error: storage slot 0x{s}: {}\n", .{ std.fmt.bytesToHex(slot_key, .lower), err });
+                return err;
+            };
         }
         return root;
     }
