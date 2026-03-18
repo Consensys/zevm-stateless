@@ -44,7 +44,7 @@ fn run() !void {
     // Parse flags and collect positional (file path) arguments.
     var file_paths = std.ArrayListUnmanaged([]const u8){};
     var in_format: InFormat = .ssz;
-    var out_format: OutFormat = .ssz;
+    var out_format: OutFormat = .json;
     {
         var arg_i: usize = 1;
         while (arg_i < args.len) : (arg_i += 1) {
@@ -97,7 +97,12 @@ fn run() !void {
             std.process.exit(1);
         };
         const result = executor.verifyStatelessNewPayload(allocator, si) catch |err| {
-            std.debug.print("error: stateless validation failed: {}\n", .{err});
+            std.debug.print("error: stateless validation failed: {} (block #{d}, state_root=0x{s}, witness nodes={d})\n", .{
+                err,
+                si.block.number,
+                std.fmt.bytesToHex(si.witness.state_root, .lower),
+                si.witness.state.len,
+            });
             std.process.exit(1);
         };
         try writeOutput(allocator, result, out_format);

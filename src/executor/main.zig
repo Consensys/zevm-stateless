@@ -49,11 +49,14 @@ pub fn prepareWitness(alloc: std.mem.Allocator, si: input.StatelessInput) !Prepa
             @memcpy(&addr, key[0..20]);
             current_addr = addr;
 
-            const account_state = (try mpt.verifyAccountIndexed(
+            const account_state = (mpt.verifyAccountIndexed(
                 si.witness.state_root,
                 addr,
                 &node_index,
-            )) orelse continue;
+            ) catch |err| {
+                std.debug.print("proof error: account 0x{s}: {}\n", .{ std.fmt.bytesToHex(addr, .lower), err });
+                return err;
+            }) orelse continue;
 
             const code: []const u8 = blk: {
                 if (std.mem.eql(u8, &account_state.code_hash, &primitives.KECCAK_EMPTY)) break :blk &.{};
@@ -79,13 +82,19 @@ pub fn prepareWitness(alloc: std.mem.Allocator, si: input.StatelessInput) !Prepa
             var raw_slot: [32]u8 = undefined;
             @memcpy(&raw_slot, key[20..52]);
 
-            const acct_state = (try mpt.verifyAccountIndexed(
+            const acct_state = (mpt.verifyAccountIndexed(
                 si.witness.state_root,
                 addr,
                 &node_index,
-            )) orelse continue;
+            ) catch |err| {
+                std.debug.print("proof error: account 0x{s} (storage lookup): {}\n", .{ std.fmt.bytesToHex(addr, .lower), err });
+                return err;
+            }) orelse continue;
 
-            const value = try mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index);
+            const value = mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index) catch |err| {
+                std.debug.print("proof error: slot 0x{s} of account 0x{s}: {}\n", .{ std.fmt.bytesToHex(raw_slot, .lower), std.fmt.bytesToHex(addr, .lower), err });
+                return err;
+            };
             if (value != 0) {
                 const entry = try pre_alloc.getOrPut(alloc, addr);
                 if (!entry.found_existing) entry.value_ptr.* = .{};
@@ -96,13 +105,19 @@ pub fn prepareWitness(alloc: std.mem.Allocator, si: input.StatelessInput) !Prepa
                 var raw_slot: [32]u8 = undefined;
                 @memcpy(&raw_slot, key[0..32]);
 
-                const acct_state = (try mpt.verifyAccountIndexed(
+                const acct_state = (mpt.verifyAccountIndexed(
                     si.witness.state_root,
                     addr,
                     &node_index,
-                )) orelse continue;
+                ) catch |err| {
+                    std.debug.print("proof error: account 0x{s} (32-byte slot context): {}\n", .{ std.fmt.bytesToHex(addr, .lower), err });
+                    return err;
+                }) orelse continue;
 
-                const value = try mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index);
+                const value = mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, &node_index) catch |err| {
+                    std.debug.print("proof error: slot 0x{s} of account 0x{s} (32-byte key): {}\n", .{ std.fmt.bytesToHex(raw_slot, .lower), std.fmt.bytesToHex(addr, .lower), err });
+                    return err;
+                };
                 if (value != 0) {
                     const entry = try pre_alloc.getOrPut(alloc, addr);
                     if (!entry.found_existing) entry.value_ptr.* = .{};
