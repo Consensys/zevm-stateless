@@ -273,7 +273,6 @@ pub fn runFixture(
                     std.debug.print("FAIL {s} ReceiptsOK={} StateOK={}\n", .{ test_name, receipts_ok, state_ok });
                 }
                 if (!quiet and json_output) {
-
                     var out = std.ArrayListUnmanaged(u8){};
                     defer out.deinit(alloc);
                     const w = out.writer(alloc);
