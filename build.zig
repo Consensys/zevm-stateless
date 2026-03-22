@@ -149,7 +149,7 @@ pub fn build(b: *std.Build) void {
     // Override for zkVM builds:
     //   exe.root_module.addImport("main_allocator", your_alloc_module)
     const main_allocator_mod = b.createModule(.{
-        .root_source_file = b.path("src/main_allocator.zig"),
+        .root_source_file = b.path("src/zkvm/allocator.zig"),
         .target = target,
         .optimize = optimize,
         .link_libc = true,
@@ -160,7 +160,7 @@ pub fn build(b: *std.Build) void {
     // Override for zkVM builds:
     //   exe.root_module.addImport("zkvm_io", your_io_module)
     const zkvm_io_mod = b.createModule(.{
-        .root_source_file = b.path("src/zkvm_io.zig"),
+        .root_source_file = b.path("src/zkvm/io.zig"),
         .target = target,
         .optimize = optimize,
     });
@@ -168,7 +168,7 @@ pub fn build(b: *std.Build) void {
     const exe = b.addExecutable(.{
         .name = "zevm_stateless",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/main.zig"),
+            .root_source_file = b.path("src/stateless/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
