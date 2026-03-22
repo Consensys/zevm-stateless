@@ -1,8 +1,12 @@
-/// EIP system call handlers for pre- and post-block processing.
+/// EIP system contract call handlers for pre- and post-block processing.
 ///
-/// All system calls execute as SYSTEM_ADDRESS calling the target contract,
-/// outside normal gas accounting and tx validation. State changes are
-/// committed on success and discarded on revert.
+/// "System contract calls" here refers to EVM-level calls made by the
+/// protocol itself (from SYSTEM_ADDRESS) to designated system contracts —
+/// not OS/machine-level system calls.
+///
+/// All system contract calls execute outside normal gas accounting and
+/// tx validation. State changes are committed on success and discarded
+/// on revert.
 ///
 /// Pre-block  (Cancun+/Prague+, before user transactions):
 ///   EIP-4788 — call beacon roots contract with parent_beacon_block_root as calldata.
