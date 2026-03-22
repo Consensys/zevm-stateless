@@ -13,7 +13,6 @@
 
 const std = @import("std");
 const primitives = @import("primitives");
-const context = @import("context");
 const input = @import("input");
 const output = @import("output");
 const mpt = @import("mpt");
@@ -104,24 +103,4 @@ pub fn executeBlock(
         .receipts = receipts_data,
         .fork_name = fork_mod.specName(spec),
     };
-}
-
-/// Convert a BlockHeader into the zevm BlockEnv required for EVM execution.
-pub fn blockEnvFromHeader(header: input.BlockHeader) context.BlockEnv {
-    var block_env = context.BlockEnv.default();
-
-    block_env.number = @as(primitives.U256, header.number);
-    block_env.beneficiary = header.beneficiary;
-    block_env.timestamp = @as(primitives.U256, header.timestamp);
-    block_env.gas_limit = header.gas_limit;
-    block_env.basefee = header.base_fee_per_gas orelse 0;
-    block_env.difficulty = @as(primitives.U256, 0); // always 0 for PoS
-    block_env.prevrandao = header.mix_hash;
-
-    block_env.setBlobExcessGasAndPrice(
-        header.excess_blob_gas orelse 0,
-        primitives.BLOB_BASE_FEE_UPDATE_FRACTION_PRAGUE,
-    );
-
-    return block_env;
 }
