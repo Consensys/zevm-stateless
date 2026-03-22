@@ -10,8 +10,8 @@
 ///   --file FILE       Run a single fixture file instead of the whole suite
 ///   -x                Stop after the first failure
 ///   -q                Quiet — only print FAIL lines and the summary
-///   --json            Print JSON diagnostics on failure (pretty-printed via jq)
-///   --raw-json        Like --json but single-line (no jq pretty-print)
+///   --json            Print JSON diagnostics on failure (single-line)
+///   --pretty-json     Like --json but pretty-printed via jq
 ///
 /// For each fixture, validates post_state_root, receipts_root, and lastblockhash.
 /// Multi-block test cases are skipped.
@@ -55,9 +55,9 @@ pub fn main() !void {
             quiet = true;
         } else if (std.mem.eql(u8, arg, "--json")) {
             json_output = true;
-        } else if (std.mem.eql(u8, arg, "--raw-json")) {
-            json_output = true;
             raw_json = true;
+        } else if (std.mem.eql(u8, arg, "--pretty-json")) {
+            json_output = true;
         } else if (std.mem.startsWith(u8, arg, "--fixtures=")) {
             fixtures_dir = arg["--fixtures=".len..];
         } else if (std.mem.startsWith(u8, arg, "--fork=")) {
@@ -117,8 +117,8 @@ pub fn main() !void {
             if (fork_filter) |f| try argv.appendSlice(allocator, &.{ "--fork", f });
             if (quiet) try argv.append(allocator, "-q");
             if (stop_on_fail) try argv.append(allocator, "-x");
-            if (json_output and !raw_json) try argv.append(allocator, "--json");
-            if (raw_json) try argv.append(allocator, "--raw-json");
+            if (json_output and !raw_json) try argv.append(allocator, "--pretty-json");
+            if (raw_json) try argv.append(allocator, "--json");
 
             var child = std.process.Child.init(argv.items, allocator);
             child.stderr_behavior = .Pipe;
