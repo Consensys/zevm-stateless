@@ -61,6 +61,10 @@ pub const Env = struct {
     parent_excess_blob_gas: ?u64 = null,
     parent_blob_gas_used: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
+    /// Per-block blob base fee update fraction override.
+    /// When set, used instead of the spec-derived default in buildBlockEnv.
+    /// Read from config.blobSchedule[fork].baseFeeUpdateFraction in test fixtures.
+    blob_base_fee_update_fraction: ?u64 = null,
     /// EIP-2935: parent block hash for history storage contract (Prague+).
     parent_hash: ?Hash = null,
     block_hashes: []BlockHashEntry = &.{},

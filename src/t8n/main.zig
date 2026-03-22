@@ -27,6 +27,7 @@ const std = @import("std");
 
 const input_mod = @import("input.zig");
 const transition_mod = @import("executor_transition");
+const hardfork = @import("hardfork");
 const output_mod = @import("output.zig");
 
 pub fn main() !void {
@@ -93,7 +94,7 @@ pub fn main() !void {
 
     // ── Resolve fork ──────────────────────────────────────────────────────────
 
-    const spec = transition_mod.specFromFork(state_fork) orelse {
+    const spec = hardfork.specFromFork(state_fork) orelse {
         std.debug.print("t8n: unknown fork: {s}\n", .{state_fork});
         std.process.exit(3);
     };

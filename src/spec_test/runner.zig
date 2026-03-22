@@ -12,6 +12,7 @@ const std = @import("std");
 
 const input_mod = @import("t8n_input");
 const transition_mod = @import("executor_transition");
+const hardfork = @import("hardfork");
 const output_mod = @import("executor_output");
 
 // ─── Public stats ─────────────────────────────────────────────────────────────
@@ -361,7 +362,21 @@ pub fn runFixture(
         const env_json = try valueToJson(alloc, env_json_val);
 
         const pre_alloc_base = input_mod.parseAlloc(alloc, pre_json) catch continue;
-        const env = input_mod.parseEnv(alloc, env_json) catch continue;
+        const env_base = input_mod.parseEnv(alloc, env_json) catch continue;
+
+        // blobSchedule from config (optional; used to pass per-fork blob fraction to the executor)
+        const blob_schedule: ?std.json.ObjectMap = blk: {
+            const cv = test_obj.get("config") orelse break :blk null;
+            const co = switch (cv) {
+                .object => |o| o,
+                else => break :blk null,
+            };
+            const bsv = co.get("blobSchedule") orelse break :blk null;
+            break :blk switch (bsv) {
+                .object => |o| o,
+                else => null,
+            };
+        };
 
         // Iterate forks
         var fork_it = post_val.iterator();
@@ -374,7 +389,7 @@ pub fn runFixture(
             }
 
             // Resolve spec (skip unknown forks)
-            const spec = transition_mod.specFromFork(fork) orelse {
+            const spec = hardfork.specFromFork(fork) orelse {
                 const post_entries = switch (fork_kv.value_ptr.*) {
                     .array => |a| a.items,
                     else => continue,
@@ -390,6 +405,26 @@ pub fn runFixture(
                 .array => |a| a.items,
                 else => continue,
             };
+
+            // Apply per-fork blob base fee update fraction from blobSchedule.
+            var env = env_base;
+            if (blob_schedule) |bs| {
+                if (bs.get(fork)) |fv| {
+                    if (fv == .object) {
+                        if (fv.object.get("baseFeeUpdateFraction")) |frac_v| {
+                            env.blob_base_fee_update_fraction = switch (frac_v) {
+                                .integer => |n| @intCast(n),
+                                .string => |s| blk: {
+                                    const stripped = if (s.len >= 2 and s[0] == '0' and (s[1] == 'x' or s[1] == 'X')) s[2..] else s;
+                                    break :blk std.fmt.parseInt(u64, stripped, 16) catch
+                                        std.fmt.parseInt(u64, s, 10) catch null;
+                                },
+                                else => null,
+                            };
+                        }
+                    }
+                }
+            }
 
             for (post_entries, 0..) |post_entry_v, post_idx| {
                 const post_entry = switch (post_entry_v) {

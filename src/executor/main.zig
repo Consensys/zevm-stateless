@@ -20,7 +20,7 @@ const mpt = @import("mpt");
 
 const transition_mod = @import("executor_transition");
 const output_mod = @import("executor_output");
-const fork_mod = @import("executor_fork");
+const fork_mod = @import("hardfork");
 const tx_decode = @import("executor_tx_decode");
 const types = @import("executor_types");
 
@@ -41,7 +41,7 @@ pub fn executeBlock(
 ) !output.ProofOutput {
     // 1. Detect fork and build Env.
     const spec = if (fork_name) |name|
-        fork_mod.specFromName(name) orelse fork_mod.mainnetSpec(header.number, header.timestamp)
+        fork_mod.specFromFork(name) orelse fork_mod.mainnetSpec(header.number, header.timestamp)
     else
         fork_mod.mainnetSpec(header.number, header.timestamp);
 
