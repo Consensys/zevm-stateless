@@ -454,7 +454,7 @@ pub fn build(b: *std.Build) void {
     const spec_test_exe = b.addExecutable(.{
         .name = "spec-test-runner",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/spec_test_runner.zig"),
+            .root_source_file = b.path("src/spec_test/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -516,7 +516,7 @@ pub fn build(b: *std.Build) void {
     const bc_test_exe = b.addExecutable(.{
         .name = "blockchain-test-runner",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/blockchain_test_runner.zig"),
+            .root_source_file = b.path("src/blockchain_test/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{
@@ -531,7 +531,7 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_transition", .module = native_executor_transition_mod },
                 .{ .name = "executor_output", .module = native_executor_output_mod },
-                .{ .name = "blockchain_test/runner.zig", .module = blockchain_test_runner_mod },
+                .{ .name = "runner.zig", .module = blockchain_test_runner_mod },
             },
         }),
     });
@@ -563,7 +563,7 @@ pub fn build(b: *std.Build) void {
     const all_spec_exe = b.addExecutable(.{
         .name = "all-spec-tests-runner",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/all_spec_tests_runner.zig"),
+            .root_source_file = b.path("src/all_spec_tests/main.zig"),
             .target = target,
             .optimize = optimize,
         }),
@@ -587,7 +587,7 @@ pub fn build(b: *std.Build) void {
     const hive_rlp_exe = b.addExecutable(.{
         .name = "hive-rlp",
         .root_module = b.createModule(.{
-            .root_source_file = b.path("src/hive_rlp.zig"),
+            .root_source_file = b.path("src/hive/main.zig"),
             .target = target,
             .optimize = optimize,
             .imports = &.{

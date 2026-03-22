@@ -9,10 +9,10 @@
 /// On startup: parse genesis → import blocks → serve eth_getBlockByNumber on :8545.
 const std = @import("std");
 
-const fork_env = @import("hive/fork_env.zig");
-const genesis = @import("hive/genesis.zig");
-const chain_mod = @import("hive/chain.zig");
-const rpc = @import("hive/rpc.zig");
+const fork_env = @import("fork_env.zig");
+const genesis = @import("genesis.zig");
+const chain_mod = @import("chain.zig");
+const rpc = @import("rpc.zig");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
