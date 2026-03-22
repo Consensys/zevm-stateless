@@ -508,7 +508,6 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
-    blockchain_test_runner_mod.addImport("primitives", primitives);
     blockchain_test_runner_mod.addImport("executor_types", executor_types_mod);
     blockchain_test_runner_mod.addImport("executor_transition", native_executor_transition_mod);
     blockchain_test_runner_mod.addImport("executor_output", native_executor_output_mod);
