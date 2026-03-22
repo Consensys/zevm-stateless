@@ -219,18 +219,17 @@ pub fn runFixture(
             env.blob_base_fee_update_fraction = blobFractionForBlock(blob_schedule, network, env.timestamp);
 
             // Decode transactions.
-            const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch {
+            const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
                 if (!quiet) {
-                    std.debug.print("FAIL  {s}/{s}  tx-decode block {}\n", .{ rel_path, test_name, env.number });
                     var out = std.ArrayListUnmanaged(u8){};
                     defer out.deinit(alloc);
                     const w = out.writer(alloc);
                     try w.writeAll("{\"test_output\":{\"test\":\"");
                     try writeJsonStr(w, test_name);
-                    try w.print("\",\"error\":\"tx-decode block {}\",\"description\":\"", .{env.number});
+                    try w.print("\",\"error\":\"tx-decode block {}: {s}\",\"description\":\"", .{ env.number, @errorName(err) });
                     try writeJsonStr(w, test_description);
                     try w.writeAll("\"}}");
-                    std.debug.print("{s}\n", .{out.items});
+                    printPrettyJson(alloc, out.items, raw_json);
                 }
                 test_failed = true;
                 break;
@@ -476,9 +475,19 @@ pub fn runFixture(
         const lbh_ok = std.mem.eql(u8, &last_valid_hash, &expected_lastblockhash);
         if (!test_failed and lbh_ok) {
             stats.passed += 1;
-            //if (!quiet) std.debug.print("PASS  {s}/{s}\n", .{ rel_path, test_name });
         } else {
             stats.failed += 1;
+            if (!quiet and !test_failed and !lbh_ok) {
+                var out = std.ArrayListUnmanaged(u8){};
+                defer out.deinit(alloc);
+                const w = out.writer(alloc);
+                try w.writeAll("{\"test_output\":{\"test\":\"");
+                try writeJsonStr(w, test_name);
+                try w.print("\",\"error\":\"lastblockhash\",\"expected\":\"0x{x}\",\"actual\":\"0x{x}\",\"description\":\"", .{ expected_lastblockhash, last_valid_hash });
+                try writeJsonStr(w, test_description);
+                try w.writeAll("\"}}");
+                printPrettyJson(alloc, out.items, raw_json);
+            }
             if (stop_on_fail) return false;
         }
     }
@@ -749,6 +758,7 @@ fn writeJsonStr(w: anytype, s: []const u8) !void {
             '\n' => try w.writeAll("\\n"),
             '\r' => try w.writeAll("\\r"),
             '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
             else => try w.writeByte(c),
         }
     }
