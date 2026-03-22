@@ -10,7 +10,8 @@
 ///   --file FILE       Run a single fixture file instead of the whole suite
 ///   -x                Stop after the first failure
 ///   -q                Quiet — only print FAIL lines and the summary
-///   --raw-json        Print JSON failure output as a single line (no jq pretty-print)
+///   --json            Print JSON diagnostics on failure (pretty-printed via jq)
+///   --raw-json        Like --json but single-line (no jq pretty-print)
 ///
 /// For each fixture, validates post_state_root, receipts_root, and lastblockhash.
 /// Multi-block test cases are skipped.
@@ -33,6 +34,7 @@ pub fn main() !void {
     var single_file: ?[]const u8 = null;
     var stop_on_fail: bool = false;
     var quiet: bool = false;
+    var json_output: bool = false;
     var raw_json: bool = false;
 
     var i: usize = 1;
@@ -51,7 +53,10 @@ pub fn main() !void {
             stop_on_fail = true;
         } else if (std.mem.eql(u8, arg, "-q")) {
             quiet = true;
+        } else if (std.mem.eql(u8, arg, "--json")) {
+            json_output = true;
         } else if (std.mem.eql(u8, arg, "--raw-json")) {
+            json_output = true;
             raw_json = true;
         } else if (std.mem.startsWith(u8, arg, "--fixtures=")) {
             fixtures_dir = arg["--fixtures=".len..];
@@ -67,7 +72,7 @@ pub fn main() !void {
     var stats = runner.RunStats{};
 
     if (single_file) |path| {
-        _ = try processFile(allocator, path, path, fork_filter, stop_on_fail, quiet, raw_json, &stats);
+        _ = try processFile(allocator, path, path, fork_filter, stop_on_fail, quiet, json_output, raw_json, &stats);
     } else {
         var dir = std.fs.cwd().openDir(fixtures_dir, .{ .iterate = true }) catch |err| {
             std.debug.print("error: cannot open fixtures dir '{s}': {}\n", .{ fixtures_dir, err });
@@ -112,6 +117,7 @@ pub fn main() !void {
             if (fork_filter) |f| try argv.appendSlice(allocator, &.{ "--fork", f });
             if (quiet) try argv.append(allocator, "-q");
             if (stop_on_fail) try argv.append(allocator, "-x");
+            if (json_output and !raw_json) try argv.append(allocator, "--json");
             if (raw_json) try argv.append(allocator, "--raw-json");
 
             var child = std.process.Child.init(argv.items, allocator);
@@ -184,6 +190,7 @@ fn processFile(
     fork_filter: ?[]const u8,
     stop_on_fail: bool,
     quiet: bool,
+    json_output: bool,
     raw_json: bool,
     stats: *runner.RunStats,
 ) !bool {
@@ -196,7 +203,7 @@ fn processFile(
         return true;
     };
 
-    return runner.runFixture(alloc, json_text, fork_filter, stop_on_fail, quiet, raw_json, stats, rel_path);
+    return runner.runFixture(alloc, json_text, fork_filter, stop_on_fail, quiet, json_output, raw_json, stats, rel_path);
 }
 
 fn printSummary(stats: runner.RunStats) void {

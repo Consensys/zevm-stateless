@@ -44,6 +44,7 @@ pub fn runFixture(
     fork_filter: ?[]const u8,
     stop_on_fail: bool,
     quiet: bool,
+    json_output: bool,
     raw_json: bool,
     stats: *RunStats,
     rel_path: []const u8,
@@ -220,7 +221,7 @@ pub fn runFixture(
 
             // Decode transactions.
             const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
-                if (!quiet) {
+                if (!quiet and json_output) {
                     var out = std.ArrayListUnmanaged(u8){};
                     defer out.deinit(alloc);
                     const w = out.writer(alloc);
@@ -270,6 +271,8 @@ pub fn runFixture(
 
                 if (!quiet) {
                     std.debug.print("FAIL {s} ReceiptsOK={} StateOK={}\n", .{ test_name, receipts_ok, state_ok });
+                }
+                if (!quiet and json_output) {
 
                     var out = std.ArrayListUnmanaged(u8){};
                     defer out.deinit(alloc);
@@ -477,7 +480,7 @@ pub fn runFixture(
             stats.passed += 1;
         } else {
             stats.failed += 1;
-            if (!quiet and !test_failed and !lbh_ok) {
+            if (!quiet and json_output and !test_failed and !lbh_ok) {
                 var out = std.ArrayListUnmanaged(u8){};
                 defer out.deinit(alloc);
                 const w = out.writer(alloc);
