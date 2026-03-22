@@ -45,7 +45,6 @@ pub fn runFixture(
     stop_on_fail: bool,
     quiet: bool,
     json_output: bool,
-    raw_json: bool,
     stats: *RunStats,
     rel_path: []const u8,
 ) !bool {
@@ -230,7 +229,7 @@ pub fn runFixture(
                     try w.print("\",\"error\":\"tx-decode block {}: {s}\",\"description\":\"", .{ env.number, @errorName(err) });
                     try writeJsonStr(w, test_description);
                     try w.writeAll("\"}}");
-                    printPrettyJson(alloc, out.items, raw_json);
+                    std.debug.print("{s}\n", .{out.items});
                 }
                 test_failed = true;
                 break;
@@ -468,7 +467,7 @@ pub fn runFixture(
 
                     try w.writeAll("}}");
 
-                    printPrettyJson(alloc, out.items, raw_json);
+                    std.debug.print("{s}\n", .{out.items});
                 }
             }
         }
@@ -488,7 +487,7 @@ pub fn runFixture(
                 try w.print("\",\"error\":\"lastblockhash\",\"expected\":\"0x{x}\",\"actual\":\"0x{x}\",\"description\":\"", .{ expected_lastblockhash, last_valid_hash });
                 try writeJsonStr(w, test_description);
                 try w.writeAll("\"}}");
-                printPrettyJson(alloc, out.items, raw_json);
+                std.debug.print("{s}\n", .{out.items});
             }
             if (stop_on_fail) return false;
         }
@@ -724,32 +723,6 @@ fn getString2(v: std.json.Value) ?[]const u8 {
         .string => |s| s,
         else => null,
     };
-}
-
-fn printPrettyJson(alloc: std.mem.Allocator, json: []const u8, raw: bool) void {
-    if (raw) {
-        std.debug.print("{s}\n", .{json});
-        return;
-    }
-    var child = std.process.Child.init(&.{ "jq", "." }, alloc);
-    child.stdin_behavior = .Pipe;
-    child.stdout_behavior = .Pipe;
-    child.stderr_behavior = .Inherit;
-    child.spawn() catch {
-        std.debug.print("{s}\n", .{json});
-        return;
-    };
-    child.stdin.?.writeAll(json) catch {};
-    child.stdin.?.close();
-    child.stdin = null;
-    const out = child.stdout.?.readToEndAlloc(alloc, 4 * 1024 * 1024) catch {
-        _ = child.wait() catch {};
-        std.debug.print("{s}\n", .{json});
-        return;
-    };
-    defer alloc.free(out);
-    _ = child.wait() catch {};
-    std.debug.print("{s}", .{out});
 }
 
 fn writeJsonStr(w: anytype, s: []const u8) !void {
