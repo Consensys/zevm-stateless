@@ -32,7 +32,7 @@ pub fn specName(spec: primitives.SpecId) []const u8 {
         .osaka => "Osaka",
         .bpo1 => "BPO1",
         .bpo2 => "BPO2",
-        else => "Unknown",
+        .amsterdam => "Amsterdam",
     };
 }
 
@@ -65,6 +65,7 @@ pub fn specFromFork(name: []const u8) ?primitives.SpecId {
         .{ .k = "Osaka", .v = .osaka },
         .{ .k = "BPO1", .v = .bpo1 },
         .{ .k = "BPO2", .v = .bpo2 },
+        .{ .k = "Amsterdam", .v = .amsterdam },
     };
     for (table) |e| {
         if (std.mem.eql(u8, name, e.k)) return e.v;
@@ -87,6 +88,7 @@ const transition_table = [_]TransitionEntry{
     .{ .k = "PragueToOsakaAtTime15k", .before = .prague, .after = .osaka },
     .{ .k = "OsakaToBPO1AtTime15k", .before = .osaka, .after = .bpo1 },
     .{ .k = "BPO1ToBPO2AtTime15k", .before = .bpo1, .after = .bpo2 },
+    .{ .k = "BPO2ToAmsterdamAtTime15k", .before = .bpo2, .after = .amsterdam },
 };
 
 /// For transition fork names (e.g. "CancunToPragueAtTime15k"), returns the

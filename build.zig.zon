@@ -33,8 +33,7 @@
     // internet connectivity.
     .dependencies = .{
         .zevm = .{
-            .url = "https://github.com/Consensys/zevm/archive/refs/tags/v0.5.2-consensys.tar.gz",
-            .hash = "zevm-0.4.0-HzrXkhqIEQBgCTMqDryFEahHYzTSqlR6QreylxrJq6_d",
+            .path = "../zevm",
         },
     },
     // Specifies the set of files and directories that are included in this package.

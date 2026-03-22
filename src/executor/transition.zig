@@ -131,6 +131,7 @@ fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
         const fraction = env.blob_base_fee_update_fraction orelse blobFractionForSpec(spec);
         block.setBlobExcessGasAndPrice(ebg, fraction);
     }
+    block.slot_number = env.slot_number;
     return block;
 }
 
@@ -173,7 +174,8 @@ pub fn transition(
     var receipts = std.ArrayListUnmanaged(Receipt){};
     var rejected = std.ArrayListUnmanaged(RejectedTx){};
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput){};
-    var cumulative_gas: u64 = 0;
+    var cumulative_gas: u64 = 0; // block gas (max(regular, state) per tx, for block header gasUsed)
+    var cumulative_receipt_gas: u64 = 0; // receipt gas (regular + state per tx, for cumulativeGasUsed)
     var block_bloom = bloom.ZERO;
     var total_blob_gas: u64 = 0;
     var log_index_global: u64 = 0;
@@ -229,8 +231,9 @@ pub fn transition(
             }
         }
 
-        // 1c. EIP-7825 (Osaka+): max gas limit per transaction = 2^24
-        if (primitives.isEnabledIn(spec, .osaka) and tx.gas > 0x01000000) {
+        // 1c. EIP-7825 (Osaka through BPO2): max gas limit per transaction = 2^24
+        // Amsterdam supersedes EIP-7825 via the EIP-8037 reservoir model (no hard cap).
+        if (primitives.isEnabledIn(spec, .osaka) and !primitives.isEnabledIn(spec, .amsterdam) and tx.gas > 0x01000000) {
             try rejected.append(arena, .{
                 .index = tx_idx,
                 .err = "gas limit exceeds EIP-7825 maximum (2^24)",
@@ -452,8 +455,8 @@ pub fn transition(
         ctx.tx.authorization_list = null;
 
         // 5. Build receipt
-        const gas_used = exec_result.gas_used;
-        cumulative_gas += gas_used;
+        cumulative_gas += exec_result.block_gas_used;
+        cumulative_receipt_gas += exec_result.gas_used;
 
         const status: u8 = if (exec_result.status == .Success) 1 else 0;
         const egp = effectiveGasPrice(tx, env.base_fee orelse 0);
@@ -510,8 +513,8 @@ pub fn transition(
             .block_number = env.number,
             .from = sender,
             .to = tx.to,
-            .cumulative_gas_used = cumulative_gas,
-            .gas_used = gas_used,
+            .cumulative_gas_used = cumulative_receipt_gas,
+            .gas_used = exec_result.gas_used,
             .contract_address = contract_addr,
             .logs = try receipt_logs.toOwnedSlice(arena),
             .logs_bloom = receipt_bloom,
@@ -564,6 +567,79 @@ pub fn transition(
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
     system_calls.applyPostBlockCalls(&ctx, &instructions, &precompiles, spec, chain_id);
+
+    // ── EIP-7708 (Amsterdam+): Finalization Burn logs ─────────────────────────
+    // Selfdestructed accounts that received ETH after their SELFDESTRUCT (within
+    // the same tx) retain a non-zero balance.  EIP-7708 requires emitting a
+    // Burn log for each such account, sorted by address, appended to the last
+    // receipt's log list.
+    if (primitives.isEnabledIn(spec, .amsterdam) and receipts.items.len > 0) {
+        const ETH_TRANSFER_ADDR: input.Address = .{
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+            0xff, 0xff, 0xff, 0xfe,
+        };
+        // keccak256("Burn(address,uint256)")
+        const BURN_SIG: input.Hash = .{
+            0xcc, 0x16, 0xf5, 0xdb, 0xb4, 0x87, 0x32, 0x80,
+            0x81, 0x5c, 0x1e, 0xe0, 0x9d, 0xbd, 0x06, 0x73,
+            0x6c, 0xff, 0xcc, 0x18, 0x44, 0x12, 0xcf, 0x7a,
+            0x71, 0xa0, 0xfd, 0xb7, 0x5d, 0x39, 0x7c, 0xa5,
+        };
+
+        const BurnEntry = struct { addr: input.Address, balance: u256 };
+        var burn_list = std.ArrayListUnmanaged(BurnEntry){};
+
+        var sd_it = ctx.journaled_state.inner.evm_state.iterator();
+        while (sd_it.next()) |entry| {
+            const acct = entry.value_ptr.*;
+            if (acct.status.self_destructed and acct.info.balance > 0) {
+                try burn_list.append(arena, .{ .addr = entry.key_ptr.*, .balance = acct.info.balance });
+            }
+        }
+
+        if (burn_list.items.len > 0) {
+            std.mem.sort(BurnEntry, burn_list.items, {}, struct {
+                fn lt(_: void, a: BurnEntry, b: BurnEntry) bool {
+                    return std.mem.lessThan(u8, &a.addr, &b.addr);
+                }
+            }.lt);
+
+            var last = &receipts.items[receipts.items.len - 1];
+            var new_logs = std.ArrayListUnmanaged(Log){};
+            try new_logs.appendSlice(arena, last.logs);
+
+            for (burn_list.items) |be| {
+                var topic_addr: input.Hash = [_]u8{0} ** 32;
+                @memcpy(topic_addr[12..], &be.addr);
+
+                var data_buf: [32]u8 = undefined;
+                std.mem.writeInt(u256, &data_buf, be.balance, .big);
+
+                const topics = try arena.alloc(input.Hash, 2);
+                topics[0] = BURN_SIG;
+                topics[1] = topic_addr;
+
+                bloom.addLog(&last.logs_bloom, ETH_TRANSFER_ADDR, topics);
+                bloom.merge(&block_bloom, last.logs_bloom);
+
+                try new_logs.append(arena, Log{
+                    .address = ETH_TRANSFER_ADDR,
+                    .topics = topics,
+                    .data = try arena.dupe(u8, &data_buf),
+                    .block_number = env.number,
+                    .tx_hash = last.tx_hash,
+                    .tx_index = last.tx_index,
+                    .block_hash = DUMMY_BLOCK_HASH,
+                    .log_index = log_index_global,
+                    .removed = false,
+                });
+                log_index_global += 1;
+            }
+
+            last.logs = try new_logs.toOwnedSlice(arena);
+        }
+    }
 
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc_in, &ctx);

@@ -69,6 +69,8 @@ pub const Env = struct {
     parent_hash: ?Hash = null,
     block_hashes: []BlockHashEntry = &.{},
     withdrawals: []Withdrawal = &.{},
+    /// EIP-7843 (Amsterdam+): beacon chain slot number.
+    slot_number: u64 = 0,
 };
 
 // ─── Receipt / log types ──────────────────────────────────────────────────────
