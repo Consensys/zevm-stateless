@@ -70,7 +70,8 @@ pub const Env = struct {
     block_hashes: []BlockHashEntry = &.{},
     withdrawals: []Withdrawal = &.{},
     /// EIP-7843 (Amsterdam+): beacon chain slot number.
-    slot_number: u64 = 0,
+    /// `null` when the block header does not carry a slot number (pre-Amsterdam).
+    slot_number: ?u64 = null,
 };
 
 // ─── Receipt / log types ──────────────────────────────────────────────────────

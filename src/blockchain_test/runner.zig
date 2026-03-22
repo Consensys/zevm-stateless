@@ -573,7 +573,7 @@ fn buildEnv(
         hexToHash(getString2(v) orelse "") catch null;
     if (bh.get("parentHash")) |v| env.parent_hash =
         hexToHash(getString2(v) orelse "") catch null;
-    if (bh.get("slotNumber")) |v| env.slot_number = jsonU64(v) catch 0;
+    if (bh.get("slotNumber")) |v| env.slot_number = jsonU64(v) catch null;
 
     // Withdrawals from block entry.
     if (b0.get("withdrawals")) |wv| {
