@@ -44,6 +44,7 @@ pub fn runFixture(
     fork_filter: ?[]const u8,
     stop_on_fail: bool,
     quiet: bool,
+    json_output: bool,
     stats: *RunStats,
     rel_path: []const u8,
 ) !bool {
@@ -66,6 +67,16 @@ pub fn runFixture(
         const test_obj = switch (entry.value_ptr.*) {
             .object => |o| o,
             else => continue,
+        };
+
+        // Extract description from _info for failure diagnostics.
+        const test_description: []const u8 = blk: {
+            const info = test_obj.get("_info") orelse break :blk "";
+            const info_obj = switch (info) {
+                .object => |o| o,
+                else => break :blk "",
+            };
+            break :blk getString(info_obj, "description") orelse "";
         };
 
         // Get network (fork) name.
@@ -209,7 +220,17 @@ pub fn runFixture(
 
             // Decode transactions.
             const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
-                if (!quiet) std.debug.print("FAIL  {s}/{s}  tx-decode (block {}): {}\n", .{ rel_path, test_name, env.number, err });
+                if (!quiet and json_output) {
+                    var out = std.ArrayListUnmanaged(u8){};
+                    defer out.deinit(alloc);
+                    const w = out.writer(alloc);
+                    try w.writeAll("{\"test_output\":{\"test\":\"");
+                    try writeJsonStr(w, test_name);
+                    try w.print("\",\"error\":\"tx-decode block {}: {s}\",\"description\":\"", .{ env.number, @errorName(err) });
+                    try writeJsonStr(w, test_description);
+                    try w.writeAll("\"}}");
+                    std.debug.print("{s}\n", .{out.items});
+                }
                 test_failed = true;
                 break;
             };
@@ -246,15 +267,207 @@ pub fn runFixture(
                 try block_hashes_list.append(alloc, .{ .number = env.number, .hash = expected_block_hash });
             } else {
                 test_failed = true;
+
                 if (!quiet) {
-                    if (!state_ok) std.debug.print(
-                        "FAIL  {s}/{s}  stateRoot (block {})\n  got:  0x{x}\n  want: 0x{x}\n",
-                        .{ rel_path, test_name, env.number, post_state_root, expected_block_state_root },
-                    );
-                    if (!receipts_ok) std.debug.print(
-                        "FAIL  {s}/{s}  receiptTrie (block {})\n  got:  0x{x}\n  want: 0x{x}\n",
-                        .{ rel_path, test_name, env.number, receipts_root, expected_block_receipts_root },
-                    );
+                    std.debug.print("FAIL {s} ReceiptsOK={} StateOK={}\n", .{ test_name, receipts_ok, state_ok });
+                }
+                if (!quiet and json_output) {
+                    var out = std.ArrayListUnmanaged(u8){};
+                    defer out.deinit(alloc);
+                    const w = out.writer(alloc);
+
+                    try w.writeAll("{\"test_output\":{");
+                    try w.writeAll("\"test\":\"");
+                    try writeJsonStr(w, test_name);
+                    try w.print("\",\"state_ok\":{},\"receipts_ok\":{}", .{ state_ok, receipts_ok });
+                    try w.writeAll(",\"description\":\"");
+                    try writeJsonStr(w, test_description);
+                    try w.print("\",\"expected_state_root\":\"0x{x}\"", .{expected_block_state_root});
+                    try w.print(",\"actual_state_root\":\"0x{x}\"", .{post_state_root});
+                    try w.print(",\"expected_receipts_root\":\"0x{x}\"", .{expected_block_receipts_root});
+                    try w.print(",\"actual_receipts_root\":\"0x{x}\"", .{receipts_root});
+
+                    // Expected receipts from fixture (if present).
+                    try w.writeAll(",\"expected_receipts\":[");
+                    if (block.get("receipts")) |rv| {
+                        if (rv == .array) {
+                            for (rv.array.items, 0..) |rec_v, i| {
+                                if (i > 0) try w.writeByte(',');
+                                if (rec_v != .object) {
+                                    try w.writeAll("{}");
+                                    continue;
+                                }
+                                const ro = rec_v.object;
+                                const ty_s = if (ro.get("type")) |tv| switch (tv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
+                                const status_bool = if (ro.get("status")) |sv| switch (sv) {
+                                    .bool => |b| b,
+                                    .string => |s| !std.mem.eql(u8, s, "0x0"),
+                                    else => false,
+                                } else false;
+                                const gas_s = if (ro.get("cumulativeGasUsed")) |gv| switch (gv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
+                                try w.print("{{\"type\":\"{s}\",\"status\":{},\"cumulativeGasUsed\":\"{s}\",\"logs\":[", .{ ty_s, status_bool, gas_s });
+                                if (ro.get("logs")) |lv| {
+                                    if (lv == .array) {
+                                        for (lv.array.items, 0..) |log_v, j| {
+                                            if (j > 0) try w.writeByte(',');
+                                            if (log_v != .object) {
+                                                try w.writeAll("{}");
+                                                continue;
+                                            }
+                                            const lo = log_v.object;
+                                            const addr_s = if (lo.get("address")) |av| switch (av) {
+                                                .string => |s| s,
+                                                else => "0x",
+                                            } else "0x";
+                                            try w.print("{{\"address\":\"{s}\",\"topics\":[", .{addr_s});
+                                            if (lo.get("topics")) |tv| {
+                                                if (tv == .array) {
+                                                    for (tv.array.items, 0..) |t_v, k| {
+                                                        if (k > 0) try w.writeByte(',');
+                                                        const t_s = switch (t_v) {
+                                                            .string => |s| s,
+                                                            else => "0x",
+                                                        };
+                                                        try w.print("\"{s}\"", .{t_s});
+                                                    }
+                                                }
+                                            }
+                                            const data_s = if (lo.get("data")) |dv| switch (dv) {
+                                                .string => |s| s,
+                                                else => "0x",
+                                            } else "0x";
+                                            try w.print("],\"data\":\"{s}\"}}", .{data_s});
+                                        }
+                                    }
+                                }
+                                try w.writeAll("]}");
+                            }
+                        }
+                    }
+                    try w.writeByte(']');
+
+                    // Actual receipts from execution.
+                    try w.writeAll(",\"actual_receipts\":[");
+                    for (result.receipts, 0..) |r, i| {
+                        if (i > 0) try w.writeByte(',');
+                        try w.print("{{\"type\":\"0x{x}\",\"status\":{},\"cumulativeGasUsed\":\"0x{x}\",\"logs\":[", .{ r.type, r.status, r.cumulative_gas_used });
+                        for (r.logs, 0..) |log, j| {
+                            if (j > 0) try w.writeByte(',');
+                            try w.print("{{\"address\":\"0x{x}\",\"topics\":[", .{log.address});
+                            for (log.topics, 0..) |topic, k| {
+                                if (k > 0) try w.writeByte(',');
+                                try w.print("\"0x{x}\"", .{topic});
+                            }
+                            try w.print("],\"data\":\"0x{x}\"}}", .{log.data});
+                        }
+                        try w.writeAll("]}");
+                    }
+                    try w.writeByte(']');
+
+                    // Add state comparison when state root mismatches.
+                    if (!state_ok) {
+                        // Expected post state from fixture.
+                        try w.writeAll(",\"expected_post_state\":{");
+                        const post_state_val = test_obj.get("postState");
+                        if (post_state_val != null and post_state_val.? == .object) {
+                            var ps_it = post_state_val.?.object.iterator();
+                            var ps_first = true;
+                            while (ps_it.next()) |ps_entry| {
+                                if (!ps_first) try w.writeByte(',');
+                                ps_first = false;
+                                try w.writeByte('"');
+                                try writeJsonStr(w, ps_entry.key_ptr.*);
+                                try w.writeAll("\":{");
+                                const acct_obj2 = switch (ps_entry.value_ptr.*) {
+                                    .object => |o| o,
+                                    else => {
+                                        try w.writeByte('}');
+                                        continue;
+                                    },
+                                };
+                                // balance
+                                const bal_s2 = if (acct_obj2.get("balance")) |bv| switch (bv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
+                                try w.print("\"balance\":\"{s}\"", .{bal_s2});
+                                // nonce
+                                const nonce_s2 = if (acct_obj2.get("nonce")) |nv| switch (nv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
+                                try w.print(",\"nonce\":\"{s}\"", .{nonce_s2});
+                                // codeHash
+                                const code_hex2 = if (acct_obj2.get("code")) |cv| switch (cv) {
+                                    .string => |s| s,
+                                    else => "0x",
+                                } else "0x";
+                                const code_bytes2 = hexToSlice(alloc, code_hex2) catch &[_]u8{};
+                                var code_hash2: [32]u8 = undefined;
+                                std.crypto.hash.sha3.Keccak256.hash(code_bytes2, &code_hash2, .{});
+                                try w.print(",\"codeHash\":\"0x{x}\"", .{code_hash2});
+                                // storage
+                                try w.writeAll(",\"storage\":{");
+                                if (acct_obj2.get("storage")) |sv2| {
+                                    if (sv2 == .object) {
+                                        var slot_it = sv2.object.iterator();
+                                        var slot_first = true;
+                                        while (slot_it.next()) |slot_entry| {
+                                            if (!slot_first) try w.writeByte(',');
+                                            slot_first = false;
+                                            try w.writeByte('"');
+                                            try writeJsonStr(w, slot_entry.key_ptr.*);
+                                            try w.writeAll("\":\"");
+                                            const sv3 = switch (slot_entry.value_ptr.*) {
+                                                .string => |s| s,
+                                                else => "0x0",
+                                            };
+                                            try writeJsonStr(w, sv3);
+                                            try w.writeByte('"');
+                                        }
+                                    }
+                                }
+                                try w.writeAll("}}");
+                            }
+                        }
+                        try w.writeByte('}');
+
+                        // Actual post state from execution.
+                        try w.writeAll(",\"actual_post_state\":{");
+                        var alloc_it = result.alloc.iterator();
+                        var alloc_first = true;
+                        while (alloc_it.next()) |alloc_entry| {
+                            if (!alloc_first) try w.writeByte(',');
+                            alloc_first = false;
+                            try w.print("\"0x{x}\":{{", .{alloc_entry.key_ptr.*});
+                            const acct2 = alloc_entry.value_ptr.*;
+                            try w.print("\"balance\":\"0x{x}\"", .{acct2.balance});
+                            try w.print(",\"nonce\":\"0x{x}\"", .{acct2.nonce});
+                            var code_hash3: [32]u8 = undefined;
+                            std.crypto.hash.sha3.Keccak256.hash(acct2.code, &code_hash3, .{});
+                            try w.print(",\"codeHash\":\"0x{x}\"", .{code_hash3});
+                            try w.writeAll(",\"storage\":{");
+                            var stor_it = acct2.storage.iterator();
+                            var stor_first = true;
+                            while (stor_it.next()) |stor_entry| {
+                                if (!stor_first) try w.writeByte(',');
+                                stor_first = false;
+                                try w.print("\"0x{x}\":\"0x{x}\"", .{ stor_entry.key_ptr.*, stor_entry.value_ptr.* });
+                            }
+                            try w.writeAll("}}");
+                        }
+                        try w.writeByte('}');
+                    }
+
+                    try w.writeAll("}}");
+
+                    std.debug.print("{s}\n", .{out.items});
                 }
             }
         }
@@ -263,13 +476,19 @@ pub fn runFixture(
         const lbh_ok = std.mem.eql(u8, &last_valid_hash, &expected_lastblockhash);
         if (!test_failed and lbh_ok) {
             stats.passed += 1;
-            if (!quiet) std.debug.print("PASS  {s}/{s}\n", .{ rel_path, test_name });
         } else {
             stats.failed += 1;
-            if (!quiet and !lbh_ok) std.debug.print(
-                "FAIL  {s}/{s}  lastblockhash\n  got:  0x{x}\n  want: 0x{x}\n",
-                .{ rel_path, test_name, last_valid_hash, expected_lastblockhash },
-            );
+            if (!quiet and json_output and !test_failed and !lbh_ok) {
+                var out = std.ArrayListUnmanaged(u8){};
+                defer out.deinit(alloc);
+                const w = out.writer(alloc);
+                try w.writeAll("{\"test_output\":{\"test\":\"");
+                try writeJsonStr(w, test_name);
+                try w.print("\",\"error\":\"lastblockhash\",\"expected\":\"0x{x}\",\"actual\":\"0x{x}\",\"description\":\"", .{ expected_lastblockhash, last_valid_hash });
+                try writeJsonStr(w, test_description);
+                try w.writeAll("\"}}");
+                std.debug.print("{s}\n", .{out.items});
+            }
             if (stop_on_fail) return false;
         }
     }
@@ -504,4 +723,18 @@ fn getString2(v: std.json.Value) ?[]const u8 {
         .string => |s| s,
         else => null,
     };
+}
+
+fn writeJsonStr(w: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try w.writeAll("\\\""),
+            '\\' => try w.writeAll("\\\\"),
+            '\n' => try w.writeAll("\\n"),
+            '\r' => try w.writeAll("\\r"),
+            '\t' => try w.writeAll("\\t"),
+            0x00...0x08, 0x0b, 0x0c, 0x0e...0x1f => try w.print("\\u{x:0>4}", .{c}),
+            else => try w.writeByte(c),
+        }
+    }
 }
