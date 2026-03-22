@@ -318,30 +318,6 @@ pub fn recoverSender(alloc: std.mem.Allocator, tx: *const input.TxInput, chain_i
     return ctx.ecrecover(hash, sig, recid);
 }
 
-/// Sign a transaction with a secret key, filling in tx.v/r/s.
-/// Returns the sender address.
-pub fn signTx(alloc: std.mem.Allocator, tx: *input.TxInput, chain_id: u64) !?input.Address {
-    const seckey = tx.secret_key orelse return null;
-
-    const hash = try signingHash(alloc, tx, chain_id);
-    const ctx = secp_wrapper.getContext() orelse return null;
-    const result = ctx.sign(hash, seckey) orelse return null;
-
-    const r = std.mem.readInt(u256, result.sig[0..32], .big);
-    const s = std.mem.readInt(u256, result.sig[32..64], .big);
-    tx.r = r;
-    tx.s = s;
-    tx.v = switch (tx.type) {
-        0 => if (tx.protected and chain_id > 0)
-            2 * @as(u256, chain_id) + 35 + result.recid
-        else
-            @as(u256, 27 + result.recid),
-        else => result.recid,
-    };
-
-    return recoverSender(alloc, tx, chain_id);
-}
-
 /// Compute CREATE address: keccak256(RLP([sender, nonce]))[12:]
 pub fn createAddress(alloc: std.mem.Allocator, sender: input.Address, nonce: u64) !input.Address {
     const items = [_][]const u8{

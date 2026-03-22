@@ -195,9 +195,6 @@ pub fn transition(
         // 1. Determine sender
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
-            if (tx.secret_key != null and (tx.r == null or (tx.r.? == 0 and tx.s.? == 0))) {
-                break :blk try tx_signing.signTx(arena, tx, chain_id);
-            }
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
                 break :blk try tx_signing.recoverSender(arena, tx, chain_id);
             }
@@ -208,7 +205,7 @@ pub fn transition(
         } else {
             try rejected.append(arena, .{
                 .index = tx_idx,
-                .err = "could not determine sender (missing signature or secretKey)",
+                .err = "could not determine sender (missing signature)",
             });
             continue;
         }
