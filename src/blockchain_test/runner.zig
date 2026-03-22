@@ -301,16 +301,16 @@ pub fn runFixture(
                                     .string => |s| s,
                                     else => "0x0",
                                 } else "0x0";
-                                const status_s = if (ro.get("status")) |sv| switch (sv) {
-                                    .bool => |b| if (b) "true" else "false",
-                                    .string => |s| s,
-                                    else => "false",
-                                } else "false";
+                                const status_bool = if (ro.get("status")) |sv| switch (sv) {
+                                    .bool => |b| b,
+                                    .string => |s| !std.mem.eql(u8, s, "0x0"),
+                                    else => false,
+                                } else false;
                                 const gas_s = if (ro.get("cumulativeGasUsed")) |gv| switch (gv) {
                                     .string => |s| s,
                                     else => "0x0",
                                 } else "0x0";
-                                try w.print("{{\"type\":\"{s}\",\"status\":{s},\"cumulativeGasUsed\":\"{s}\",\"logs\":[", .{ ty_s, status_s, gas_s });
+                                try w.print("{{\"type\":\"{s}\",\"status\":{},\"cumulativeGasUsed\":\"{s}\",\"logs\":[", .{ ty_s, status_bool, gas_s });
                                 if (ro.get("logs")) |lv| {
                                     if (lv == .array) {
                                         for (lv.array.items, 0..) |log_v, j| {
