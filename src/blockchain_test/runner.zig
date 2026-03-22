@@ -221,17 +221,17 @@ pub fn runFixture(
             // Decode transactions.
             const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch {
                 if (!quiet) {
-                std.debug.print("FAIL  {s}/{s}  tx-decode block {}\n", .{ rel_path, test_name, env.number });
-                var out = std.ArrayListUnmanaged(u8){};
-                defer out.deinit(alloc);
-                const w = out.writer(alloc);
-                try w.writeAll("{\"test_output\":{\"test\":\"");
-                try writeJsonStr(w, test_name);
-                try w.print("\",\"error\":\"tx-decode block {}\",\"description\":\"", .{env.number});
-                try writeJsonStr(w, test_description);
-                try w.writeAll("\"}}");
-                std.debug.print("{s}\n", .{out.items});
-            }
+                    std.debug.print("FAIL  {s}/{s}  tx-decode block {}\n", .{ rel_path, test_name, env.number });
+                    var out = std.ArrayListUnmanaged(u8){};
+                    defer out.deinit(alloc);
+                    const w = out.writer(alloc);
+                    try w.writeAll("{\"test_output\":{\"test\":\"");
+                    try writeJsonStr(w, test_name);
+                    try w.print("\",\"error\":\"tx-decode block {}\",\"description\":\"", .{env.number});
+                    try writeJsonStr(w, test_description);
+                    try w.writeAll("\"}}");
+                    std.debug.print("{s}\n", .{out.items});
+                }
                 test_failed = true;
                 break;
             };
@@ -293,34 +293,55 @@ pub fn runFixture(
                         if (rv == .array) {
                             for (rv.array.items, 0..) |rec_v, i| {
                                 if (i > 0) try w.writeByte(',');
-                                if (rec_v != .object) { try w.writeAll("{}"); continue; }
+                                if (rec_v != .object) {
+                                    try w.writeAll("{}");
+                                    continue;
+                                }
                                 const ro = rec_v.object;
-                                const ty_s = if (ro.get("type")) |tv| switch (tv) { .string => |s| s, else => "0x0" } else "0x0";
+                                const ty_s = if (ro.get("type")) |tv| switch (tv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
                                 const status_s = if (ro.get("status")) |sv| switch (sv) {
                                     .bool => |b| if (b) "true" else "false",
                                     .string => |s| s,
                                     else => "false",
                                 } else "false";
-                                const gas_s = if (ro.get("cumulativeGasUsed")) |gv| switch (gv) { .string => |s| s, else => "0x0" } else "0x0";
+                                const gas_s = if (ro.get("cumulativeGasUsed")) |gv| switch (gv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
                                 try w.print("{{\"type\":\"{s}\",\"status\":{s},\"cumulativeGasUsed\":\"{s}\",\"logs\":[", .{ ty_s, status_s, gas_s });
                                 if (ro.get("logs")) |lv| {
                                     if (lv == .array) {
                                         for (lv.array.items, 0..) |log_v, j| {
                                             if (j > 0) try w.writeByte(',');
-                                            if (log_v != .object) { try w.writeAll("{}"); continue; }
+                                            if (log_v != .object) {
+                                                try w.writeAll("{}");
+                                                continue;
+                                            }
                                             const lo = log_v.object;
-                                            const addr_s = if (lo.get("address")) |av| switch (av) { .string => |s| s, else => "0x" } else "0x";
+                                            const addr_s = if (lo.get("address")) |av| switch (av) {
+                                                .string => |s| s,
+                                                else => "0x",
+                                            } else "0x";
                                             try w.print("{{\"address\":\"{s}\",\"topics\":[", .{addr_s});
                                             if (lo.get("topics")) |tv| {
                                                 if (tv == .array) {
                                                     for (tv.array.items, 0..) |t_v, k| {
                                                         if (k > 0) try w.writeByte(',');
-                                                        const t_s = switch (t_v) { .string => |s| s, else => "0x" };
+                                                        const t_s = switch (t_v) {
+                                                            .string => |s| s,
+                                                            else => "0x",
+                                                        };
                                                         try w.print("\"{s}\"", .{t_s});
                                                     }
                                                 }
                                             }
-                                            const data_s = if (lo.get("data")) |dv| switch (dv) { .string => |s| s, else => "0x" } else "0x";
+                                            const data_s = if (lo.get("data")) |dv| switch (dv) {
+                                                .string => |s| s,
+                                                else => "0x",
+                                            } else "0x";
                                             try w.print("],\"data\":\"{s}\"}}", .{data_s});
                                         }
                                     }
@@ -365,16 +386,28 @@ pub fn runFixture(
                                 try w.writeAll("\":{");
                                 const acct_obj2 = switch (ps_entry.value_ptr.*) {
                                     .object => |o| o,
-                                    else => { try w.writeByte('}'); continue; },
+                                    else => {
+                                        try w.writeByte('}');
+                                        continue;
+                                    },
                                 };
                                 // balance
-                                const bal_s2 = if (acct_obj2.get("balance")) |bv| switch (bv) { .string => |s| s, else => "0x0" } else "0x0";
+                                const bal_s2 = if (acct_obj2.get("balance")) |bv| switch (bv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
                                 try w.print("\"balance\":\"{s}\"", .{bal_s2});
                                 // nonce
-                                const nonce_s2 = if (acct_obj2.get("nonce")) |nv| switch (nv) { .string => |s| s, else => "0x0" } else "0x0";
+                                const nonce_s2 = if (acct_obj2.get("nonce")) |nv| switch (nv) {
+                                    .string => |s| s,
+                                    else => "0x0",
+                                } else "0x0";
                                 try w.print(",\"nonce\":\"{s}\"", .{nonce_s2});
                                 // codeHash
-                                const code_hex2 = if (acct_obj2.get("code")) |cv| switch (cv) { .string => |s| s, else => "0x" } else "0x";
+                                const code_hex2 = if (acct_obj2.get("code")) |cv| switch (cv) {
+                                    .string => |s| s,
+                                    else => "0x",
+                                } else "0x";
                                 const code_bytes2 = hexToSlice(alloc, code_hex2) catch &[_]u8{};
                                 var code_hash2: [32]u8 = undefined;
                                 std.crypto.hash.sha3.Keccak256.hash(code_bytes2, &code_hash2, .{});
@@ -391,7 +424,10 @@ pub fn runFixture(
                                             try w.writeByte('"');
                                             try writeJsonStr(w, slot_entry.key_ptr.*);
                                             try w.writeAll("\":\"");
-                                            const sv3 = switch (slot_entry.value_ptr.*) { .string => |s| s, else => "0x0" };
+                                            const sv3 = switch (slot_entry.value_ptr.*) {
+                                                .string => |s| s,
+                                                else => "0x0",
+                                            };
                                             try writeJsonStr(w, sv3);
                                             try w.writeByte('"');
                                         }
