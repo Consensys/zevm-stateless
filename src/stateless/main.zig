@@ -300,6 +300,7 @@ fn loadFromJson(allocator: std.mem.Allocator, block_path: []const u8, witness_pa
         .block = parsed_block.header,
         .transactions = parsed_block.transactions,
         .witness = wit,
+        .withdrawals = parsed_block.withdrawals,
     };
 }
 
