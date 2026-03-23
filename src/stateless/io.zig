@@ -1,11 +1,9 @@
-//! Input loaders for zevm_stateless.
-//!
-//! Each function reads bytes from a source (zkvm_io stream or file) and
-//! delegates format decoding to the appropriate format module (rlp.zig, ssz.zig, …).
+//! Input loaders for zevm_stateless: RLP (zkVM / file) and SSZ (file / stream).
 
 const std = @import("std");
 const input_mod = @import("input");
 const rlp = @import("rlp.zig");
+const ssz = @import("ssz.zig");
 const zkvm_io = @import("zkvm_io");
 
 /// RLP from zkvm_io.read_input() — default / zkVM production path.
@@ -20,12 +18,14 @@ pub fn fromRlpFile(allocator: std.mem.Allocator, path: []const u8) !input_mod.St
     return rlp.decode(allocator, data);
 }
 
-/// SSZ from zkvm_io.read_input() — not yet implemented.
-pub fn fromSszStream(_: std.mem.Allocator) !input_mod.StatelessInput {
-    return error.SszNotImplemented;
+/// SSZ from zkvm_io.read_input().
+pub fn fromSszStream(allocator: std.mem.Allocator) !input_mod.StatelessInput {
+    const data = try zkvm_io.read_input(allocator);
+    return ssz.decode(allocator, data);
 }
 
-/// SSZ from a binary file — not yet implemented.
-pub fn fromSszFile(_: std.mem.Allocator, _: []const u8) !input_mod.StatelessInput {
-    return error.SszNotImplemented;
+/// SSZ from a binary file.
+pub fn fromSszFile(allocator: std.mem.Allocator, path: []const u8) !input_mod.StatelessInput {
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 30);
+    return ssz.decode(allocator, data);
 }
