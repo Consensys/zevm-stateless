@@ -190,6 +190,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
         transactions[i] = try rlp_decode.decodeSingleTx(alloc, raw_tx);
     }
 
+    // block_access_list: ByteList[2^24] — raw bytes (last variable field in EP)
+    const block_access_list = try alloc.dupe(u8, ep_data[off_block_access_list..]);
+
     // withdrawals: List[SszWithdrawal, N] — packed fixed-size items (no offset table)
     const wd_bytes = ep_data[off_withdrawals..off_block_access_list];
     if (wd_bytes.len % WITHDRAWAL_SIZE != 0) return error.InvalidSsz;
@@ -246,6 +249,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
                 .blob_gas_used = blob_gas_used,
                 .excess_blob_gas = excess_blob_gas,
                 .slot_number = slot_number,
+                .block_access_list = block_access_list,
             },
             .parent_beacon_block_root = parent_beacon_root,
         },

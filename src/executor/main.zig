@@ -15,6 +15,7 @@ const primitives = @import("primitives");
 const input = @import("input");
 const output = @import("output");
 const mpt = @import("mpt");
+const rlp_decode = @import("rlp_decode");
 
 const transition_mod = @import("executor_transition");
 const output_mod = @import("executor_output");
@@ -139,4 +140,58 @@ pub fn executeBlockStateless(
         alloc, db, empty_pre_alloc, env, txs, spec, chain_id, fork_mod.blockReward(spec), public_keys,
     );
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);
+}
+
+/// High-level stateless execution from a fully-decoded StatelessInput.
+/// Derives pre_state_root, builds the node index and block-hash table
+/// internally — callers only need to supply the input and an optional
+/// fork override.
+pub fn executeStatelessInput(
+    alloc: std.mem.Allocator,
+    si: input.StatelessInput,
+    fork_name: ?[]const u8,
+) !output.ProofOutput {
+    const ep = &si.new_payload_request.execution_payload;
+
+    const pre_state_root = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number) orelse ep.state_root;
+
+    var node_index = try mpt.buildNodeIndex(alloc, si.witness.nodes);
+    defer node_index.deinit();
+
+    var block_hashes = std.ArrayListUnmanaged(BlockHashEntry){};
+    for (si.witness.headers) |hdr_rlp| {
+        const hash = mpt.keccak256(hdr_rlp);
+        const outer = mpt.rlp.decodeItem(hdr_rlp) catch continue;
+        var rest = switch (outer.item) {
+            .list => |p| p,
+            .bytes => continue,
+        };
+        var skip: usize = 0;
+        while (skip < 8 and rest.len > 0) : (skip += 1) {
+            const fr = mpt.rlp.decodeItem(rest) catch break;
+            rest = rest[fr.consumed..];
+        }
+        if (rest.len == 0) continue;
+        const num_r = mpt.rlp.decodeItem(rest) catch continue;
+        const num_bytes = switch (num_r.item) {
+            .bytes => |b| b,
+            .list => continue,
+        };
+        if (num_bytes.len > 8) continue;
+        var number: u64 = 0;
+        for (num_bytes) |b| number = (number << 8) | b;
+        try block_hashes.append(alloc, .{ .number = number, .hash = hash });
+    }
+
+    return executeBlockStateless(
+        alloc,
+        pre_state_root,
+        &node_index,
+        si.new_payload_request,
+        si.witness.codes,
+        block_hashes.items,
+        fork_name,
+        si.chain_config.chain_id,
+        si.public_keys,
+    );
 }

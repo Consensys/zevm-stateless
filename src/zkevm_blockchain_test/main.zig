@@ -1,0 +1,205 @@
+/// zkevm-blockchain-test-runner — runner for zkevm execution-spec-tests fixtures.
+///
+/// Fixture format (zkevm@v0.3.2):
+///   { "test_name": { "network": "Amsterdam", "blocks": [
+///       { "statelessInputBytes": "0x...", "statelessOutputBytes": "0x...", ... }
+///   ] } }
+///
+/// For each block, decodes the SSZ input, runs stateless execution, serializes
+/// the 41-byte SSZ output and asserts it matches `statelessOutputBytes`.
+///
+/// Usage:
+///   zkevm-blockchain-test-runner [--fixtures DIR] [--file FILE] [-q] [-x]
+const std = @import("std");
+
+const ssz_decode = @import("ssz_decode");
+const ssz_output = @import("ssz_output");
+const executor = @import("executor");
+
+pub fn main() !void {
+    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    defer _ = gpa.deinit();
+    const allocator = gpa.allocator();
+
+    const args = try std.process.argsAlloc(allocator);
+    defer std.process.argsFree(allocator, args);
+
+    var fixtures_dir: []const u8 = "spec-tests/fixtures/zkevm/blockchain_tests";
+    var single_file: ?[]const u8 = null;
+    var quiet: bool = false;
+    var stop_on_fail: bool = false;
+
+    var i: usize = 1;
+    while (i < args.len) : (i += 1) {
+        const arg = args[i];
+        if (std.mem.eql(u8, arg, "--fixtures") and i + 1 < args.len) {
+            i += 1;
+            fixtures_dir = args[i];
+        } else if (std.mem.eql(u8, arg, "--file") and i + 1 < args.len) {
+            i += 1;
+            single_file = args[i];
+        } else if (std.mem.eql(u8, arg, "-q")) {
+            quiet = true;
+        } else if (std.mem.eql(u8, arg, "-x")) {
+            stop_on_fail = true;
+        }
+    }
+
+    var passed: u64 = 0;
+    var failed: u64 = 0;
+
+    if (single_file) |path| {
+        const ok = processFile(allocator, path, quiet) catch false;
+        if (ok) passed += 1 else failed += 1;
+    } else {
+        var dir = std.fs.cwd().openDir(fixtures_dir, .{ .iterate = true }) catch |err| {
+            std.debug.print("error: cannot open fixtures dir '{s}': {}\n", .{ fixtures_dir, err });
+            std.process.exit(1);
+        };
+        defer dir.close();
+
+        var walker = try dir.walk(allocator);
+        defer walker.deinit();
+
+        var paths = std.ArrayList([]u8){};
+        defer {
+            for (paths.items) |p| allocator.free(p);
+            paths.deinit(allocator);
+        }
+
+        while (try walker.next()) |entry| {
+            if (entry.kind != .file) continue;
+            if (!std.mem.endsWith(u8, entry.path, ".json")) continue;
+            try paths.append(allocator, try allocator.dupe(u8, entry.path));
+        }
+
+        std.mem.sort([]u8, paths.items, {}, struct {
+            fn lessThan(_: void, a: []u8, b: []u8) bool {
+                return std.mem.lessThan(u8, a, b);
+            }
+        }.lessThan);
+
+        for (paths.items) |rel_path| {
+            const full_path = try std.fs.path.join(allocator, &.{ fixtures_dir, rel_path });
+            defer allocator.free(full_path);
+
+            const ok = processFile(allocator, full_path, quiet) catch false;
+            if (ok) passed += 1 else {
+                failed += 1;
+                if (stop_on_fail) break;
+            }
+        }
+    }
+
+    const total = passed + failed;
+    const pct: u64 = if (total > 0) 100 * passed / total else 0;
+    std.debug.print("\n============================================================\n", .{});
+    std.debug.print("  Results:  {}/{} passed  ({}%)\n", .{ passed, total, pct });
+    if (failed > 0) std.debug.print("  Failed:   {}\n", .{failed});
+    std.debug.print("============================================================\n", .{});
+
+    if (failed > 0) std.process.exit(1);
+}
+
+fn processFile(allocator: std.mem.Allocator, path: []const u8, quiet: bool) !bool {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const alloc = arena.allocator();
+
+    const json_text = std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024 * 1024) catch |err| {
+        std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
+        return false;
+    };
+
+    var parsed = std.json.parseFromSlice(std.json.Value, alloc, json_text, .{}) catch |err| {
+        std.debug.print("error: JSON parse failed in '{s}': {}\n", .{ path, err });
+        return false;
+    };
+    defer parsed.deinit();
+
+    if (parsed.value != .object) return false;
+
+    var all_ok = true;
+    var it = parsed.value.object.iterator();
+    while (it.next()) |kv| {
+        const test_name = kv.key_ptr.*;
+        const test_case = kv.value_ptr.*;
+        if (test_case != .object) continue;
+
+        const fork_name: ?[]const u8 = if (test_case.object.get("network")) |nv|
+            switch (nv) {
+                .string => |s| s,
+                else => null,
+            }
+        else
+            null;
+
+        const blocks_val = test_case.object.get("blocks") orelse continue;
+        if (blocks_val != .array) continue;
+
+        for (blocks_val.array.items, 0..) |block_val, block_idx| {
+            if (block_val != .object) continue;
+            const in_hex = switch (block_val.object.get("statelessInputBytes") orelse continue) {
+                .string => |s| s,
+                else => continue,
+            };
+            const out_hex = switch (block_val.object.get("statelessOutputBytes") orelse continue) {
+                .string => |s| s,
+                else => continue,
+            };
+
+            const ok = runBlock(alloc, test_name, block_idx, in_hex, out_hex, fork_name, quiet) catch |err| blk: {
+                std.debug.print("FAIL {s}[{}]  error: {}\n", .{ test_name, block_idx, err });
+                break :blk false;
+            };
+            if (!ok) all_ok = false;
+        }
+    }
+
+    return all_ok;
+}
+
+fn runBlock(
+    alloc: std.mem.Allocator,
+    test_name: []const u8,
+    block_idx: usize,
+    in_hex: []const u8,
+    out_hex: []const u8,
+    fork_name: ?[]const u8,
+    quiet: bool,
+) !bool {
+    const in_stripped = if (std.mem.startsWith(u8, in_hex, "0x")) in_hex[2..] else in_hex;
+    const out_stripped = if (std.mem.startsWith(u8, out_hex, "0x")) out_hex[2..] else out_hex;
+
+    const input_bytes = try alloc.alloc(u8, in_stripped.len / 2);
+    _ = try std.fmt.hexToBytes(input_bytes, in_stripped);
+
+    if (out_stripped.len != 82) return error.BadOutputLength;
+    var expected: [41]u8 = undefined;
+    _ = try std.fmt.hexToBytes(&expected, out_stripped);
+
+    const si = try ssz_decode.decode(alloc, input_bytes);
+    const ep = &si.new_payload_request.execution_payload;
+
+    const proof = try executor.executeStatelessInput(alloc, si, fork_name);
+
+    if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) {
+        std.debug.print("FAIL {s}[{}]  post_state_root mismatch\n", .{ test_name, block_idx });
+        return false;
+    }
+    if (!std.mem.eql(u8, &proof.receipts_root, &ep.receipts_root)) {
+        std.debug.print("FAIL {s}[{}]  receipts_root mismatch\n", .{ test_name, block_idx });
+        return false;
+    }
+
+    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id);
+    if (!std.mem.eql(u8, &computed, &expected)) {
+        const got_hex = std.fmt.bytesToHex(computed, .lower);
+        const exp_hex = std.fmt.bytesToHex(expected, .lower);
+        std.debug.print("FAIL {s}[{}]  output mismatch\n  got:      0x{s}\n  expected: 0x{s}\n", .{ test_name, block_idx, &got_hex, &exp_hex });
+        return false;
+    }
+
+    if (!quiet) std.debug.print("PASS {s}[{}]\n", .{ test_name, block_idx });
+    return true;
+}

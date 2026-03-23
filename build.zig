@@ -394,6 +394,7 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("executor_output", native_executor_output_mod);
     executor_mod.addImport("hardfork", hardfork_mod);
     executor_mod.addImport("executor_tx_decode", native_executor_tx_decode_mod);
+    executor_mod.addImport("rlp_decode", rlp_decode_mod);
 
     // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
     const t8n_input_mod = b.createModule(.{
@@ -640,4 +641,76 @@ pub fn build(b: *std.Build) void {
             "echo 'Done. Fixtures extracted to spec-tests/fixtures/'",
     });
     fetch_fixtures_step.dependOn(&fetch_cmd.step);
+
+    // ---------------------------------------------------------------------------
+    // zkevm-blockchain-test-runner — runner for zkevm execution-spec-tests fixtures
+    //
+    // Decodes SSZ statelessInputBytes, runs stateless execution, and asserts the
+    // 41-byte SSZ output matches statelessOutputBytes.
+    //
+    // Usage: zig build zkevm-tests [-- --fixtures DIR -q -x]
+    // Fixtures dir: spec-tests/fixtures/zkevm/blockchain_tests
+    //   (download with: zig build fetch-zkevm-fixtures)
+    // ---------------------------------------------------------------------------
+
+    // ssz_decode — SSZ input decoder (src/stateless/ssz.zig)
+    const ssz_decode_mod = b.createModule(.{
+        .root_source_file = b.path("src/stateless/ssz.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ssz_decode_mod.addImport("input", input_mod);
+    ssz_decode_mod.addImport("rlp_decode", rlp_decode_mod);
+
+    // ssz_output — SSZ output serializer (src/stateless/ssz_output.zig)
+    const ssz_output_mod = b.createModule(.{
+        .root_source_file = b.path("src/stateless/ssz_output.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    ssz_output_mod.addImport("input", input_mod);
+
+    const zkevm_bc_test_exe = b.addExecutable(.{
+        .name = "zkevm-blockchain-test-runner",
+        .root_module = b.createModule(.{
+            .root_source_file = b.path("src/zkevm_blockchain_test/main.zig"),
+            .target = target,
+            .optimize = optimize,
+            .imports = &.{
+                .{ .name = "executor", .module = executor_mod },
+                .{ .name = "ssz_decode", .module = ssz_decode_mod },
+                .{ .name = "ssz_output", .module = ssz_output_mod },
+            },
+        }),
+    });
+    zkevm_bc_test_exe.addIncludePath(.{ .cwd_relative = crypto_include });
+    zkevm_bc_test_exe.linkSystemLibrary("secp256k1");
+    zkevm_bc_test_exe.linkSystemLibrary("ssl");
+    zkevm_bc_test_exe.linkSystemLibrary("crypto");
+    zkevm_bc_test_exe.linkSystemLibrary("c");
+    zkevm_bc_test_exe.linkSystemLibrary("m");
+    zkevm_bc_test_exe.addObjectFile(.{ .cwd_relative = libblst_path });
+    addMcl(zkevm_bc_test_exe, is_linux, libmcl_path);
+
+    b.installArtifact(zkevm_bc_test_exe);
+
+    const run_zkevm_tests_step = b.step("zkevm-tests", "Run zkevm blockchain test fixtures");
+    const run_zkevm_tests_cmd = b.addRunArtifact(zkevm_bc_test_exe);
+    run_zkevm_tests_cmd.step.dependOn(b.getInstallStep());
+    run_zkevm_tests_cmd.addArgs(&.{ "--fixtures", "spec-tests/fixtures/zkevm/blockchain_tests" });
+    if (b.args) |extra_args| run_zkevm_tests_cmd.addArgs(extra_args);
+    run_zkevm_tests_step.dependOn(&run_zkevm_tests_cmd.step);
+
+    // zig build fetch-zkevm-fixtures — download zkevm@v0.3.2 fixtures
+    const fetch_zkevm_step = b.step("fetch-zkevm-fixtures", "Download zkevm@v0.3.2 execution-spec-tests fixtures");
+    const fetch_zkevm_cmd = b.addSystemCommand(&.{
+        "sh", "-c",
+        "mkdir -p spec-tests/fixtures/zkevm && " ++
+            "echo 'Downloading zkevm@v0.3.2 fixtures...' && " ++
+            "curl -fL " ++
+            "https://github.com/ethereum/execution-spec-tests/releases/download/zkevm%40v0.3.2/fixtures_zkevm.tar.gz " ++
+            "| tar xz --strip-components=1 -C spec-tests/fixtures/zkevm/ && " ++
+            "echo 'Done. Fixtures extracted to spec-tests/fixtures/zkevm/'",
+    });
+    fetch_zkevm_step.dependOn(&fetch_zkevm_cmd.step);
 }

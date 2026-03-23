@@ -131,10 +131,27 @@ fn htByteList32(data: []const u8) [32]u8 {
     return mixInLength(chunk, data.len);
 }
 
-/// ByteList[2^24]: always empty for Amsterdam (block_access_list).
+/// ByteList[2^24]: block_access_list.
 /// limit = 2^24 bytes → ceil(2^24/32) = 2^19 chunk limit → depth 19.
-fn htByteList2_24Empty() [32]u8 {
-    return mixInLength(zeroHash(19), 0);
+/// TODO: replace with allocator-backed version for large access lists.
+fn htByteList2_24(data: []const u8) [32]u8 {
+    const chunk_limit_depth = 19;
+    if (data.len == 0) return mixInLength(zeroHash(chunk_limit_depth), 0);
+    const nchunks = (data.len + 31) / 32;
+    if (nchunks <= 32) {
+        var leaf_buf: [32][32]u8 = undefined;
+        for (0..nchunks) |i| {
+            leaf_buf[i] = [_]u8{0} ** 32;
+            const start = i * 32;
+            const end = @min(start + 32, data.len);
+            @memcpy(leaf_buf[i][0..end - start], data[start..end]);
+        }
+        const root = sparseRoot(leaf_buf[0..nchunks], chunk_limit_depth);
+        return mixInLength(root, data.len);
+    } else {
+        const root = sparseRootFromBytes(data, chunk_limit_depth);
+        return mixInLength(root, data.len);
+    }
 }
 
 /// ByteList[2^30]: one raw transaction.
@@ -270,8 +287,8 @@ fn htExecutionPayload(alloc: std.mem.Allocator, ep: input.ExecutionPayload) !([3
     chunks[15] = htU64(ep.blob_gas_used);
     chunks[16] = htU64(ep.excess_blob_gas);
 
-    // f17: block_access_list: ByteList[2^24] — always empty for Amsterdam
-    chunks[17] = htByteList2_24Empty();
+    // f17: block_access_list: ByteList[2^24]
+    chunks[17] = htByteList2_24(ep.block_access_list);
 
     // f18: slot_number: uint64
     chunks[18] = htU64(ep.slot_number orelse 0);

@@ -126,6 +126,10 @@ pub const ExecutionPayload = struct {
     blob_gas_used: u64,
     excess_blob_gas: u64,
     slot_number: ?u64 = null,
+    /// Raw bytes of the block_access_list field (RLP-encoded).
+    /// Populated by the SSZ decoder; empty on JSON/RLP paths.
+    /// TODO: decode and use for actual BAL processing.
+    block_access_list: []const u8 = &.{},
 };
 
 pub const NewPayloadRequest = struct {
