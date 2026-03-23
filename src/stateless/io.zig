@@ -12,6 +12,7 @@ const std = @import("std");
 const input_mod = @import("input");
 const rlp_decode = @import("rlp_decode");
 const json_mod = @import("json.zig");
+const ssz = @import("ssz.zig");
 const zkvm_io = @import("zkvm_io");
 
 /// Deserialize a zevm-zisk binary StatelessInput from stdin.
@@ -58,6 +59,17 @@ pub fn fromStdin(allocator: std.mem.Allocator) !input_mod.StatelessInput {
         .witness = witness,
         .withdrawals = blk.withdrawals,
     };
+}
+
+/// Decode an SSZ-encoded SszStatelessInput from a byte slice.
+pub fn fromSszData(allocator: std.mem.Allocator, data: []const u8) !input_mod.StatelessInput {
+    return ssz.decode(allocator, data);
+}
+
+/// Decode an SSZ-encoded SszStatelessInput from a file on disk.
+pub fn fromSszFile(allocator: std.mem.Allocator, path: []const u8) !input_mod.StatelessInput {
+    const data = try std.fs.cwd().readFileAlloc(allocator, path, 1 << 30);
+    return ssz.decode(allocator, data);
 }
 
 /// Read a u64-count array of u64-length-prefixed byte slices (zero-copy into `data`).

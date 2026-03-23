@@ -85,6 +85,8 @@ pub const BlockHeader = struct {
     parent_beacon_block_root: ?primitives.Hash, // [19]
     // EIP-7685 (Prague+)
     requests_hash: ?primitives.Hash, // [20]
+    // Amsterdam+ (slot number from beacon chain)
+    slot_number: ?u64 = null, // [21]
 };
 
 /// State witness in debug_executionWitness flat-pool format.
