@@ -10,29 +10,51 @@ Stateless EVM block verifier in Zig. Verifies MPT proofs and executes blocks aga
 
 ## Quick start
 
+```bash
+zig build gen-example   # generate examples/block.json + examples/witness.json
+zig build run           # run against them (RLP from zkvm_io, default zkVM path)
+zig build test          # run all tests
+```
+
+## CLI usage
+
+```
+zevm_stateless [--fork F]                                    # RLP via zkvm_io (default / zkVM)
+zevm_stateless --ssz [--fork F]                              # SSZ via zkvm_io (stub)
+zevm_stateless --rlp <file> [--fork F]                       # RLP binary file
+zevm_stateless --ssz <file> [--fork F]                       # SSZ binary file (stub)
+zevm_stateless --json <block.json> <witness.json> [--fork F] # JSON files
+```
+
+- **No flag** — production zkVM path: reads binary RLP input from `zkvm_io.read_input()` (overridden by `zevm-stateless-zisk` to read from a memory region).
+- **`--rlp <file>`** — reads a binary RLP-encoded `StatelessInput` from a file (testing convenience).
+- **`--json <block> <witness>`** — parses two JSON files (testing convenience).
+- **`--ssz`** — SSZ support is a planned next step; currently returns a clear error.
+- **`--fork <name>`** — override the hardfork detection (e.g. `--fork Cancun`).
+
+Bare positional arguments without a format flag are an error.
+
 ## Synthetic example
 
 ```bash
-zig build gen-example   # generate examples/block.json + witness.json
-zig build run           # run against them
-zig build test          # run all tests
+zig build gen-example
+zig-out/bin/zevm_stateless --json examples/block.json examples/witness.json
 ```
 
 ## Test vectors
 
 ```bash
-zig build run-test-block
+zig-out/bin/zevm_stateless --json test/vectors/test_block.json test/vectors/test_block_witness.json
 ```
 
-Runs against `test/vectors/test_block.json` + `test/vectors/test_block_witness.json`
-(block #1, 100 transactions, 81 nodes, 106 accounts, 11 storage slots, 5 contracts).
+Runs against a mainnet-style block (block #1, 100 transactions, 81 nodes, 106 accounts, 11 storage slots, 5 contracts).
 
 ## Live node
 ```bash
 zig build
 ./run_proof.sh http://127.0.0.1:64393 1 # (endpoint, block number)
 ```
-`run_proof.sh` calls `debug_getRawBlock` and `debug_executionWitness` on the node, then runs the verifier.
+`run_proof.sh` calls `debug_getRawBlock` and `debug_executionWitness` on the node, writes temporary JSON files, then runs the verifier with `--json`.
 
 ## Output:
 
@@ -100,7 +122,7 @@ The script:
 1. Calls `debug_getRawBlock` to get the full RLP-encoded block.
 2. Calls `debug_generateWitness` (falls back to `debug_executionWitness`).
 3. Writes temporary `block.json` and `witness.json` files.
-4. Runs `zig-out/bin/zevm_stateless` on them (builds if not already built).
+4. Runs `zig-out/bin/zevm_stateless --json block.json witness.json` (builds if not already built).
 
 > **Note:** `debug_getRawBlock`, `debug_generateWitness` / `debug_executionWitness` are non-standard Geth debug methods. Most public RPC endpoints do not expose them.
 
