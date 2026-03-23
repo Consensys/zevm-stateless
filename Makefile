@@ -1,4 +1,4 @@
-SPEC_TEST_VERSION = v5.4.0
+SPEC_TEST_VERSION = bal@v5.5.1
 SPEC_TEST_DIR = spec-tests
 
 ZIG_BUILD_CMD = zig build
@@ -97,7 +97,7 @@ $(SPEC_TEST_DIR)/.fixtures-$(SPEC_TEST_VERSION):
 	@echo "Downloading execution-spec-tests $(SPEC_TEST_VERSION)..."
 	rm -rf $(SPEC_TEST_DIR)/fixtures
 	mkdir -p $(SPEC_TEST_DIR)/fixtures
-	curl -fL "https://github.com/ethereum/execution-spec-tests/releases/download/$(SPEC_TEST_VERSION)/fixtures_develop.tar.gz" \
+	curl -fL "https://github.com/ethereum/execution-spec-tests/releases/download/$(SPEC_TEST_VERSION)/fixtures_bal.tar.gz" \
 		| tar xz --strip-components=1 -C $(SPEC_TEST_DIR)/fixtures/
 	touch $@
 	@echo "Downloaded execution-spec-tests $(SPEC_TEST_VERSION)"

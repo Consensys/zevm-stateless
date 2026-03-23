@@ -131,6 +131,7 @@ fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
         const fraction = env.blob_base_fee_update_fraction orelse blobFractionForSpec(spec);
         block.setBlobExcessGasAndPrice(ebg, fraction);
     }
+    block.slot_number = env.slot_number;
     return block;
 }
 
@@ -173,7 +174,8 @@ pub fn transition(
     var receipts = std.ArrayListUnmanaged(Receipt){};
     var rejected = std.ArrayListUnmanaged(RejectedTx){};
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput){};
-    var cumulative_gas: u64 = 0;
+    var cumulative_gas: u64 = 0; // block gas (max(regular, state) per tx, for block header gasUsed)
+    var cumulative_receipt_gas: u64 = 0; // receipt gas (regular + state per tx, for cumulativeGasUsed)
     var block_bloom = bloom.ZERO;
     var total_blob_gas: u64 = 0;
     var log_index_global: u64 = 0;
@@ -229,8 +231,9 @@ pub fn transition(
             }
         }
 
-        // 1c. EIP-7825 (Osaka+): max gas limit per transaction = 2^24
-        if (primitives.isEnabledIn(spec, .osaka) and tx.gas > 0x01000000) {
+        // 1c. EIP-7825 (Osaka through BPO2): max gas limit per transaction = 2^24
+        // Amsterdam supersedes EIP-7825 via the EIP-8037 reservoir model (no hard cap).
+        if (primitives.isEnabledIn(spec, .osaka) and !primitives.isEnabledIn(spec, .amsterdam) and tx.gas > 0x01000000) {
             try rejected.append(arena, .{
                 .index = tx_idx,
                 .err = "gas limit exceeds EIP-7825 maximum (2^24)",
@@ -452,8 +455,8 @@ pub fn transition(
         ctx.tx.authorization_list = null;
 
         // 5. Build receipt
-        const gas_used = exec_result.gas_used;
-        cumulative_gas += gas_used;
+        cumulative_gas += exec_result.block_gas_used;
+        cumulative_receipt_gas += exec_result.gas_used;
 
         const status: u8 = if (exec_result.status == .Success) 1 else 0;
         const egp = effectiveGasPrice(tx, env.base_fee orelse 0);
@@ -510,8 +513,8 @@ pub fn transition(
             .block_number = env.number,
             .from = sender,
             .to = tx.to,
-            .cumulative_gas_used = cumulative_gas,
-            .gas_used = gas_used,
+            .cumulative_gas_used = cumulative_receipt_gas,
+            .gas_used = exec_result.gas_used,
             .contract_address = contract_addr,
             .logs = try receipt_logs.toOwnedSlice(arena),
             .logs_bloom = receipt_bloom,

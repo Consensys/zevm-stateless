@@ -388,6 +388,7 @@ fn buildEnv(
         json_helpers.hexToHash(json_helpers.getString2(v) orelse "") catch null;
     if (bh.get("parentHash")) |v| env.parent_hash =
         json_helpers.hexToHash(json_helpers.getString2(v) orelse "") catch null;
+    if (bh.get("slotNumber")) |v| env.slot_number = json_helpers.jsonU64(v) catch null;
 
     // Withdrawals from block entry.
     if (b0.get("withdrawals")) |wv| {
