@@ -57,14 +57,14 @@ pub fn main() !void {
             }
         } else if (std.mem.eql(u8, arg, "--json")) {
             arg_i += 1;
-            if (arg_i >= args.len) {
+            if (arg_i >= args.len or std.mem.startsWith(u8, args[arg_i], "--")) {
                 std.debug.print("error: --json requires block and witness paths\n", .{});
                 printUsage();
                 std.process.exit(1);
             }
             const block_path = args[arg_i];
             arg_i += 1;
-            if (arg_i >= args.len) {
+            if (arg_i >= args.len or std.mem.startsWith(u8, args[arg_i], "--")) {
                 std.debug.print("error: --json requires block and witness paths\n", .{});
                 printUsage();
                 std.process.exit(1);
