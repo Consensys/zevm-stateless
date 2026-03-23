@@ -12,7 +12,7 @@
 #   1. debug_getRawBlock      — to get the full RLP-encoded block
 #   2. debug_generateWitness  — to get the flat proof witness
 #      (falls back to debug_executionWitness if the first call returns an error)
-# Then runs: zig-out/bin/zevm_stateless <block.json> <witness.json>
+# Then runs: zig-out/bin/zevm_stateless --json <block.json> <witness.json>
 #
 # Requirements: curl, jq
 
@@ -133,4 +133,4 @@ if [ ! -f "$BINARY" ]; then
 fi
 
 echo ""
-exec "$BINARY" "$BLOCK_JSON" "$WITNESS_JSON"
+exec "$BINARY" --json "$BLOCK_JSON" "$WITNESS_JSON"

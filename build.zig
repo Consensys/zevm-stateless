@@ -217,6 +217,7 @@ pub fn build(b: *std.Build) void {
     const run_test_block_cmd = b.addRunArtifact(exe);
     run_test_block_cmd.step.dependOn(b.getInstallStep());
     run_test_block_cmd.addArgs(&.{
+        "--json",
         "test/vectors/stateless/test_block.json",
         "test/vectors/stateless/test_block_witness.json",
     });
