@@ -89,27 +89,6 @@ pub const BlockHeader = struct {
     slot_number: ?u64 = null, // [21]
 };
 
-/// State witness in debug_executionWitness flat-pool format.
-pub const StateWitness = struct {
-    /// Pre-execution state root (from the parent block header — the trust anchor).
-    state_root: primitives.Hash,
-
-    /// Flat pool of RLP-encoded trie node preimages.
-    /// Nodes are referenced by keccak256(node_bytes) during proof traversal.
-    nodes: []const []const u8,
-
-    /// Contract bytecodes. keccak256(codes[i]) == account.code_hash.
-    codes: []const []const u8,
-
-    /// Accessed state keys for this block:
-    ///   20 bytes = account address
-    ///   52 bytes = account address (20) + storage slot (32)
-    ///   32 bytes = standalone storage slot (context = nearest preceding address key)
-    keys: []const []const u8,
-
-    /// RLP-encoded ancestor block headers needed for the BLOCKHASH opcode.
-    headers: []const []const u8,
-};
 
 /// EIP-4895 withdrawal (Shanghai+).
 pub const Withdrawal = struct {
@@ -119,14 +98,90 @@ pub const Withdrawal = struct {
     amount: u64, // gwei
 };
 
-/// Full input to the guest program.
-pub const StatelessInput = struct {
-    /// Decoded block header (all consensus fields).
-    block: BlockHeader,
-    /// Transactions in execution order (decoded from RLP or binary).
+// ─── Amsterdam spec types ─────────────────────────────────────────────────────
+
+/// Spec-matching execution payload (Amsterdam+).
+/// Transactions are stored decoded (ready for execution).
+/// parent_beacon_block_root lives in NewPayloadRequest (one level up).
+pub const ExecutionPayload = struct {
+    parent_hash: primitives.Hash,
+    fee_recipient: primitives.Address,
+    state_root: primitives.Hash, // POST-execution root (for output verification)
+    receipts_root: primitives.Hash,
+    logs_bloom: [256]u8,
+    prev_randao: primitives.Hash,
+    block_number: u64,
+    gas_limit: u64,
+    gas_used: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee_per_gas: u64,
+    block_hash: primitives.Hash,
     transactions: []const Transaction,
-    /// State witness for Phase 1 (MPT verification) and Phase 2 (database).
-    witness: StateWitness,
-    /// EIP-4895 withdrawals (Shanghai+). Empty slice for pre-Shanghai blocks.
-    withdrawals: []const Withdrawal = &.{},
+    /// Raw RLP bytes for each transaction, parallel to `transactions`.
+    /// Populated by the SSZ decoder; empty slice on JSON/RLP paths.
+    /// Used to compute the SSZ hash_tree_root of the execution payload.
+    raw_transactions: []const []const u8 = &.{},
+    withdrawals: []const Withdrawal,
+    blob_gas_used: u64,
+    excess_blob_gas: u64,
+    slot_number: ?u64 = null,
 };
+
+pub const NewPayloadRequest = struct {
+    execution_payload: ExecutionPayload,
+    parent_beacon_block_root: primitives.Hash,
+    // versioned_hashes, execution_requests: ignored
+};
+
+/// Execution witness (spec-matching Amsterdam ExecutionWitness).
+/// state_root is NOT stored here — derived in stateless/main.zig via findPreStateRoot.
+pub const ExecutionWitness = struct {
+    nodes: []const []const u8, // trie node preimages (spec field: `state`)
+    codes: []const []const u8, // contract bytecodes
+    headers: []const []const u8, // RLP ancestor block headers
+};
+
+pub const ChainConfig = struct {
+    chain_id: u64 = 1,
+};
+
+/// Top-level input (matches Amsterdam spec StatelessInput).
+pub const StatelessInput = struct {
+    new_payload_request: NewPayloadRequest,
+    witness: ExecutionWitness,
+    chain_config: ChainConfig = .{},
+    /// Pre-recovered secp256k1 public keys, one per transaction in order.
+    /// Each entry is 64 bytes (uncompressed, no 0x04 prefix); empty slice = not provided.
+    /// When provided, used to derive sender address instead of calling ecrecover.
+    public_keys: []const []const u8 = &.{},
+};
+
+/// Build an ExecutionPayload from a BlockHeader + decoded transactions + withdrawals.
+/// Used by RLP and JSON decoders. Maps consensus-layer field names to execution-payload names.
+pub fn payloadFromBlock(
+    block: BlockHeader,
+    transactions: []const Transaction,
+    withdrawals: []const Withdrawal,
+) ExecutionPayload {
+    return .{
+        .parent_hash = block.parent_hash,
+        .fee_recipient = block.beneficiary,
+        .state_root = block.state_root,
+        .receipts_root = block.receipts_root,
+        .logs_bloom = block.logs_bloom,
+        .prev_randao = block.mix_hash,
+        .block_number = block.number,
+        .gas_limit = block.gas_limit,
+        .gas_used = block.gas_used,
+        .timestamp = block.timestamp,
+        .extra_data = block.extra_data,
+        .base_fee_per_gas = block.base_fee_per_gas orelse 0,
+        .block_hash = @splat(0), // not stored in BlockHeader
+        .transactions = transactions,
+        .withdrawals = withdrawals,
+        .blob_gas_used = block.blob_gas_used orelse 0,
+        .excess_blob_gas = block.excess_blob_gas orelse 0,
+        .slot_number = block.slot_number,
+    };
+}

@@ -10,7 +10,6 @@
 
 const std = @import("std");
 const input_mod = @import("input");
-const rlp_decode = @import("rlp_decode");
 const json_mod = @import("json.zig");
 
 /// Decode a zevm-zisk binary RLP StatelessInput from raw bytes.
@@ -30,23 +29,19 @@ pub fn decode(allocator: std.mem.Allocator, data: []const u8) !input_mod.Statele
     // ── ExecutionWitness ──────────────────────────────────────────────────────
     const nodes = try readSliceArray(allocator, data, &pos);
     const codes = try readSliceArray(allocator, data, &pos);
-    const keys = try readSliceArray(allocator, data, &pos);
+    _ = try readSliceArray(allocator, data, &pos); // keys — legacy field, ignored
     const headers = try readSliceArray(allocator, data, &pos);
 
-    var witness = input_mod.StateWitness{
-        .state_root = @splat(0),
-        .nodes = nodes,
-        .codes = codes,
-        .keys = keys,
-        .headers = headers,
-    };
-    witness.state_root = rlp_decode.findPreStateRoot(witness.headers, blk.header.number) orelse blk.header.state_root;
-
     return input_mod.StatelessInput{
-        .block = blk.header,
-        .transactions = blk.transactions,
-        .witness = witness,
-        .withdrawals = blk.withdrawals,
+        .new_payload_request = .{
+            .execution_payload = input_mod.payloadFromBlock(blk.header, blk.transactions, blk.withdrawals),
+            .parent_beacon_block_root = blk.header.parent_beacon_block_root orelse @splat(0),
+        },
+        .witness = .{
+            .nodes = nodes,
+            .codes = codes,
+            .headers = headers,
+        },
     };
 }
 

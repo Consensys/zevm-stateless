@@ -33,7 +33,7 @@ const BlockJson = struct {
 const WitnessFields = struct {
     state: []const []const u8,
     codes: []const []const u8,
-    keys: []const []const u8,
+    keys: ?[]const []const u8 = null, // legacy field; ignored during execution
     headers: []const []const u8,
 };
 
@@ -88,7 +88,7 @@ pub fn parseBlockJson(
 pub fn parseWitnessJson(
     allocator: std.mem.Allocator,
     json_str: []const u8,
-) !input.StateWitness {
+) !input.ExecutionWitness {
     const parsed = try std.json.parseFromSlice(
         WitnessJson,
         allocator,
@@ -100,15 +100,14 @@ pub fn parseWitnessJson(
     const fields: WitnessFields = if (parsed.value.result) |r| r else .{
         .state = parsed.value.state orelse return error.MissingField,
         .codes = parsed.value.codes orelse return error.MissingField,
-        .keys = parsed.value.keys orelse return error.MissingField,
+        // keys is optional (legacy field); parse if present, ignore otherwise
         .headers = parsed.value.headers orelse return error.MissingField,
     };
 
-    return input.StateWitness{
-        .state_root = @splat(0), // filled in by the caller from ParsedBlock
+    return input.ExecutionWitness{
         .nodes = try hexSliceArray(allocator, fields.state),
         .codes = try hexSliceArray(allocator, fields.codes),
-        .keys = try hexSliceArray(allocator, fields.keys),
+        // keys ignored: Amsterdam spec ExecutionWitness has no keys field
         .headers = try hexSliceArray(allocator, fields.headers),
     };
 }
@@ -121,13 +120,13 @@ pub fn parseBlockAndWitness(
     witness_json_str: []const u8,
 ) !input.StatelessInput {
     const blk = try parseBlockJson(allocator, block_json_str);
-    var wit = try parseWitnessJson(allocator, witness_json_str);
-    wit.state_root = rlp_decode.findPreStateRoot(wit.headers, blk.header.number) orelse blk.header.state_root;
+    const wit = try parseWitnessJson(allocator, witness_json_str);
     return input.StatelessInput{
-        .block = blk.header,
-        .transactions = blk.transactions,
+        .new_payload_request = .{
+            .execution_payload = input.payloadFromBlock(blk.header, blk.transactions, blk.withdrawals),
+            .parent_beacon_block_root = blk.header.parent_beacon_block_root orelse @splat(0),
+        },
         .witness = wit,
-        .withdrawals = blk.withdrawals,
     };
 }
 

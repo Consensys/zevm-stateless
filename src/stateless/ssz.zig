@@ -104,11 +104,12 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     // ── SszStatelessInput fixed region (20 bytes) ─────────────────────────────
     // [0..4]   offset → new_payload_request (variable)
     // [4..8]   offset → witness (variable)
-    // [8..16]  chain_config.chain_id (uint64, fixed inline, ignored)
-    // [16..20] offset → public_keys (variable, ignored)
+    // [8..16]  chain_config.chain_id (uint64, fixed inline)
+    // [16..20] offset → public_keys (variable)
     if (data.len < 20) return error.InvalidSsz;
     const off_npr: usize = readU32(data, 0);
     const off_witness: usize = readU32(data, 4);
+    const chain_id: u64 = readU64(data, 8);
     const off_pubkeys: usize = readU32(data, 16);
 
     if (off_npr < 20 or off_witness > data.len or off_pubkeys > data.len) return error.InvalidSsz;
@@ -116,6 +117,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
 
     const npr_data = data[off_npr..off_witness];
     const witness_data = data[off_witness..off_pubkeys];
+    const pubkeys_data = data[off_pubkeys..];
 
     // ── SszNewPayloadRequest fixed region (44 bytes) ──────────────────────────
     // [0..4]   offset → execution_payload (variable)
@@ -163,7 +165,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const off_extra_data: usize = readU32(ep_data, 436);
     // base_fee_per_gas: uint256 LE — low 8 bytes give the u64 value
     const base_fee_per_gas: u64 = readU64(ep_data, 440);
-    // block_hash at [472..504] — ignored (derived value, not used for execution)
+    var block_hash: [32]u8 = undefined;
+    @memcpy(&block_hash, ep_data[472..504]);
+    // block_hash at [472..504] — not used for execution but needed for SSZ hash_tree_root
     const off_transactions: usize = readU32(ep_data, 504);
     const off_withdrawals: usize = readU32(ep_data, 508);
     const blob_gas_used: u64 = readU64(ep_data, 512);
@@ -211,55 +215,46 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const codes = try decodeByteListList(alloc, witness_data[off_codes..off_headers]);
     const headers = try decodeByteListList(alloc, witness_data[off_headers..]);
 
-    // ── Pre-state root: from parent block header in witness ───────────────────
-    // The witness headers include ancestor block headers; the parent's state_root
-    // is the pre-execution trust anchor. Falls back to the payload state_root
-    // (post-execution) if no matching parent header is found.
-    const pre_state_root = rlp_decode.findPreStateRoot(headers, block_number) orelse state_root;
+    // ── Public keys: List[ByteList[48], N] ────────────────────────────────────
+    // Pre-recovered secp256k1 public keys, one per transaction in order.
+    // SSZ schema declares ByteList[48] as the element type (legacy bound from the spec),
+    // but Amsterdam keys are 64 bytes (uncompressed, no 0x04 prefix). The decoder returns
+    // whatever bytes are present; transition.zig accepts only 64-byte entries.
+    // Empty list = no pre-recovered keys supplied.
+    const public_keys = try decodeByteListList(alloc, pubkeys_data);
 
     // ── Assemble StatelessInput ───────────────────────────────────────────────
-    // Consensus-only fields absent from the SSZ execution payload → PoS defaults.
-    // KECCAK_EMPTY_LIST = keccak256(RLP([])) = 0x1dcc4de8dec75d7aab85b567b6ccd41ad312451b948a7413f0a142fd40d49347
-    const keccak_empty_list = [32]u8{
-        0x1d, 0xcc, 0x4d, 0xe8, 0xde, 0xc7, 0x5d, 0x7a,
-        0xab, 0x85, 0xb5, 0x67, 0xb6, 0xcc, 0xd4, 0x1a,
-        0xd3, 0x12, 0x45, 0x1b, 0x94, 0x8a, 0x74, 0x13,
-        0xf0, 0xa1, 0x42, 0xfd, 0x40, 0xd4, 0x93, 0x47,
-    };
-
     return input_mod.StatelessInput{
-        .block = .{
-            .parent_hash = parent_hash,
-            .ommers_hash = keccak_empty_list, // always KECCAK_EMPTY_LIST in PoS
-            .beneficiary = fee_recipient,
-            .state_root = state_root, // POST-execution (for output verification)
-            .transactions_root = @splat(0), // not present in SSZ payload
-            .receipts_root = receipts_root,
-            .logs_bloom = logs_bloom,
-            .difficulty = 0, // always 0 in PoS
-            .number = block_number,
-            .gas_limit = gas_limit,
-            .gas_used = gas_used,
-            .timestamp = timestamp,
-            .extra_data = extra_data,
-            .mix_hash = prev_randao,
-            .nonce = 0, // always 0 in PoS
-            .base_fee_per_gas = base_fee_per_gas,
-            .withdrawals_root = null, // not present in SSZ payload
-            .blob_gas_used = blob_gas_used,
-            .excess_blob_gas = excess_blob_gas,
+        .new_payload_request = .{
+            .execution_payload = .{
+                .parent_hash = parent_hash,
+                .fee_recipient = fee_recipient,
+                .state_root = state_root, // POST-execution (for output verification)
+                .receipts_root = receipts_root,
+                .logs_bloom = logs_bloom,
+                .prev_randao = prev_randao,
+                .block_number = block_number,
+                .gas_limit = gas_limit,
+                .gas_used = gas_used,
+                .timestamp = timestamp,
+                .extra_data = extra_data,
+                .base_fee_per_gas = base_fee_per_gas,
+                .block_hash = block_hash,
+                .transactions = transactions,
+                .raw_transactions = txs_raw,
+                .withdrawals = withdrawals,
+                .blob_gas_used = blob_gas_used,
+                .excess_blob_gas = excess_blob_gas,
+                .slot_number = slot_number,
+            },
             .parent_beacon_block_root = parent_beacon_root,
-            .requests_hash = null, // not present in SSZ payload
-            .slot_number = slot_number,
         },
-        .transactions = transactions,
         .witness = .{
-            .state_root = pre_state_root,
             .nodes = nodes,
             .codes = codes,
-            .keys = &.{}, // SSZ witness has no keys; pre_alloc starts empty (TODO)
             .headers = headers,
         },
-        .withdrawals = withdrawals,
+        .chain_config = .{ .chain_id = if (chain_id != 0) chain_id else 1 },
+        .public_keys = public_keys,
     };
 }

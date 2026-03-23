@@ -316,6 +316,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+    // db_mod needs executor_types for BlockHashEntry (defined after db_mod creation)
+    db_mod.addImport("executor_types", executor_types_mod);
+    db_mod.addImport("database", database);
 
     // executor_rlp_encode — RLP encoding primitives; shared by transition and output
     const executor_rlp_encode_mod = b.createModule(.{

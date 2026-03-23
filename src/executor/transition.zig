@@ -149,6 +149,8 @@ fn effectiveGasPrice(tx: *const input.TxInput, base_fee: u64) u128 {
 
 // ─── Main transition function ─────────────────────────────────────────────────
 
+/// Backward-compatible entry point: builds InMemoryDB from pre_alloc, then runs transition.
+/// Used by blockchain-test runner, t8n, and the stateful executor path.
 pub fn transition(
     arena: std.mem.Allocator,
     pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
@@ -156,10 +158,30 @@ pub fn transition(
     txs: []input.TxInput,
     spec: primitives.SpecId,
     chain_id: u64,
-    reward: i64, // mining reward in wei; -1 = disabled
+    reward: i64,
 ) !TransitionResult {
-    // ── Build DB and EVM context ──────────────────────────────────────────────
     const db = try buildDb(pre_alloc_in, env.block_hashes);
+    return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward, &.{});
+}
+
+/// Entry point for stateless execution: accepts an InMemoryDB pre-wired with a
+/// WitnessDatabase fallback, plus optional pre-recovered public keys.
+pub fn transitionWithDb(
+    arena: std.mem.Allocator,
+    db: database_mod.InMemoryDB,
+    pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    env: input.Env,
+    txs: []input.TxInput,
+    spec: primitives.SpecId,
+    chain_id: u64,
+    reward: i64,
+    /// Pre-recovered secp256k1 public keys, one per tx in order (Amsterdam spec).
+    /// Each entry must be exactly 64 bytes (uncompressed, no 0x04 prefix).
+    /// When provided for tx i, sender = keccak256(pubkey)[12:] — avoids ecrecover.
+    /// Empty slice or entry shorter than 64 bytes falls back to ecrecover.
+    public_keys: []const []const u8,
+) !TransitionResult {
+    // ── Build EVM context ──────────────────────────────────────────────────
     var ctx = context_mod.Context.new(db, spec);
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
@@ -197,6 +219,18 @@ pub fn transition(
         // 1. Determine sender
         var sender: input.Address = undefined;
         const maybe_sender: ?input.Address = blk: {
+            // Use pre-recovered public key (Amsterdam spec optimization) when provided.
+            // Each public key is 64 bytes (uncompressed secp256k1, no 0x04 prefix).
+            // sender = keccak256(pubkey_64_bytes)[12:]
+            if (tx_idx < public_keys.len) {
+                const pk = public_keys[tx_idx];
+                if (pk.len == 64) {
+                    const h = rlp.keccak256(pk);
+                    var addr: input.Address = undefined;
+                    @memcpy(&addr, h[12..32]);
+                    break :blk addr;
+                }
+            }
             if (tx.r != null and tx.s != null and (tx.r.? != 0 or tx.s.? != 0)) {
                 break :blk try tx_signing.recoverSender(arena, tx, chain_id);
             }
@@ -691,7 +725,9 @@ fn extractPostState(
             const key = slot.key_ptr.*;
             const present = slot.value_ptr.*.present_value;
             if (present == 0) {
-                if (acct.pre_storage_root != null) {
+                if (!fresh_storage) {
+                    // Existing account: keep zero as a deletion marker for computeStateRootDelta.
+                    // Works for both stateful (pre_storage_root set) and stateless (pre_alloc empty).
                     try acct.storage.put(arena, key, 0);
                 } else {
                     _ = acct.storage.remove(key);

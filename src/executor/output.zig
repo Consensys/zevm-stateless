@@ -91,7 +91,7 @@ pub fn computeStateRootDelta(
         const acct = entry.value_ptr.*;
         const addr_key = mpt_builder.keccak256(&addr);
 
-        const storage_root = try computeStorageRootIndexed(alloc, acct, index);
+        const storage_root = try computeStorageRootIndexed(alloc, addr, pre_state_root, acct, index);
         const code_hash: [32]u8 = if (acct.code.len > 0)
             mpt_builder.keccak256(acct.code)
         else
@@ -144,15 +144,25 @@ pub fn computeStateRoot(
     return mpt_builder.trieRoot(alloc, items);
 }
 
-/// Indexed storage root: delta-updates via pre-built NodeIndex (O(1) pool lookups),
-/// falling through to scratch-build when no pre_storage_root is set.
+/// Indexed storage root: delta-updates via pre-built NodeIndex (O(1) pool lookups).
+/// When `account.pre_storage_root` is null (stateless path — pre_alloc is empty), auto-fetches
+/// the storage root from the account trie using `pre_state_root` and `addr`.
 fn computeStorageRootIndexed(
     alloc: std.mem.Allocator,
+    addr: types.Address,
+    pre_state_root: [32]u8,
     account: types.AllocAccount,
     index: *mpt.NodeIndex,
 ) ![32]u8 {
-    if (account.pre_storage_root) |old_root| {
-        var root = old_root;
+    const old_root: ?[32]u8 = account.pre_storage_root orelse blk: {
+        // Stateless path: auto-fetch storage_root from the account trie.
+        const acct_state = mpt.verifyAccountIndexed(pre_state_root, addr, index) catch null;
+        if (acct_state) |as| break :blk as.storage_root;
+        break :blk null; // account not in pre-state → no prior storage
+    };
+
+    if (old_root) |root_val| {
+        var root = root_val;
         var it = account.storage.iterator();
         while (it.next()) |entry| {
             var slot_key: [32]u8 = undefined;

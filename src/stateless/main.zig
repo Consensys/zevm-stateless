@@ -2,9 +2,9 @@ const std = @import("std");
 
 const io = @import("io.zig");
 const json = @import("json.zig");
+const ssz_output = @import("ssz_output.zig");
 const rlp_decode = @import("rlp_decode");
 const input = @import("input");
-const primitives = @import("primitives");
 const mpt = @import("mpt");
 const executor = @import("executor");
 const alloc_mod = @import("main_allocator");
@@ -87,7 +87,7 @@ pub fn main() !void {
             std.process.exit(1);
         },
         .ssz_stream => io.fromSszStream(allocator) catch |err| {
-            std.debug.print("error: SSZ input not yet implemented: {}\n", .{err});
+            std.debug.print("error: failed to parse SSZ from zkvm_io.read_input(): {}\n", .{err});
             std.process.exit(1);
         },
         .rlp_file => |path| io.fromRlpFile(allocator, path) catch |err| {
@@ -95,7 +95,7 @@ pub fn main() !void {
             std.process.exit(1);
         },
         .ssz_file => |path| io.fromSszFile(allocator, path) catch |err| {
-            std.debug.print("error: SSZ input not yet implemented (file: '{s}'): {}\n", .{ path, err });
+            std.debug.print("error: failed to parse SSZ from '{s}': {}\n", .{ path, err });
             std.process.exit(1);
         },
         .json => |p| loadFromJson(allocator, p.block, p.witness) catch |err| {
@@ -104,66 +104,22 @@ pub fn main() !void {
         },
     };
 
-    std.debug.print("=== zevm-stateless: block #{d} ===\n\n", .{si.block.number});
+    const ep = &si.new_payload_request.execution_payload;
+
+    // Derive pre-state root from parent block header in witness.
+    const pre_state_root = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number) orelse ep.state_root;
+
+    std.debug.print("=== zevm-stateless: block #{d} ===\n\n", .{ep.block_number});
 
     std.debug.print(
-        "witness  root = 0x{x}\n" ++
-            "         {d} node(s), {d} code(s), {d} key(s), {d} header(s)\n\n",
-        .{ si.witness.state_root, si.witness.nodes.len, si.witness.codes.len, si.witness.keys.len, si.witness.headers.len },
+        "pre_state_root = 0x{x}\n" ++
+            "         {d} node(s), {d} code(s), {d} header(s)\n\n",
+        .{ pre_state_root, si.witness.nodes.len, si.witness.codes.len, si.witness.headers.len },
     );
 
     // ── Witness processing ────────────────────────────────────────────────────
     var node_index = try mpt.buildNodeIndex(allocator, si.witness.nodes);
     defer node_index.deinit();
-
-    const pre_state_root = si.witness.state_root;
-    var pre_alloc: std.AutoHashMapUnmanaged([20]u8, executor.AllocAccount) = .{};
-    var current_addr: ?[20]u8 = null;
-
-    for (si.witness.keys) |key| {
-        if (key.len == 20) {
-            var addr: [20]u8 = undefined;
-            @memcpy(&addr, key[0..20]);
-            current_addr = addr;
-
-            const account_state = (try mpt.verifyAccountIndexed(
-                si.witness.state_root,
-                addr,
-                &node_index,
-            )) orelse continue;
-
-            const code: []const u8 = blk: {
-                if (std.mem.eql(u8, &account_state.code_hash, &primitives.KECCAK_EMPTY)) break :blk &.{};
-                for (si.witness.codes) |code_bytes| {
-                    if (std.mem.eql(u8, &mpt.keccak256(code_bytes), &account_state.code_hash)) break :blk code_bytes;
-                }
-                break :blk &.{};
-            };
-
-            const entry = try pre_alloc.getOrPut(allocator, addr);
-            if (!entry.found_existing) {
-                entry.value_ptr.* = .{
-                    .balance = account_state.balance,
-                    .nonce = account_state.nonce,
-                    .code = code,
-                    .pre_storage_root = account_state.storage_root,
-                };
-            }
-        } else if (key.len == 52) {
-            var addr: [20]u8 = undefined;
-            @memcpy(&addr, key[0..20]);
-            current_addr = addr;
-            var raw_slot: [32]u8 = undefined;
-            @memcpy(&raw_slot, key[20..52]);
-            try putStorageSlot(allocator, &pre_alloc, &node_index, si.witness.state_root, addr, raw_slot);
-        } else if (key.len == 32) {
-            if (current_addr) |addr| {
-                var raw_slot: [32]u8 = undefined;
-                @memcpy(&raw_slot, key[0..32]);
-                try putStorageSlot(allocator, &pre_alloc, &node_index, si.witness.state_root, addr, raw_slot);
-            }
-        }
-    }
 
     // Decode block-hash table from witness headers.
     var block_hashes = std.ArrayListUnmanaged(executor.BlockHashEntry){};
@@ -194,29 +150,29 @@ pub fn main() !void {
     // ── Block execution ───────────────────────────────────────────────────────
     std.debug.print("Block execution\n", .{});
     std.debug.print("  block env\n", .{});
-    std.debug.print("    number      = {d}\n", .{si.block.number});
-    std.debug.print("    coinbase    = 0x{x}\n", .{si.block.beneficiary});
-    std.debug.print("    timestamp   = {d}\n", .{si.block.timestamp});
-    std.debug.print("    gas_limit   = {d}\n", .{si.block.gas_limit});
-    std.debug.print("    basefee     = {d}\n", .{si.block.base_fee_per_gas orelse 0});
-    std.debug.print("    prevrandao  = 0x{x}\n", .{si.block.mix_hash});
-    if (si.block.excess_blob_gas) |excess| {
-        std.debug.print("    excess_blob_gas = {d}\n", .{excess});
+    std.debug.print("    number      = {d}\n", .{ep.block_number});
+    std.debug.print("    coinbase    = 0x{x}\n", .{ep.fee_recipient});
+    std.debug.print("    timestamp   = {d}\n", .{ep.timestamp});
+    std.debug.print("    gas_limit   = {d}\n", .{ep.gas_limit});
+    std.debug.print("    basefee     = {d}\n", .{ep.base_fee_per_gas});
+    std.debug.print("    prevrandao  = 0x{x}\n", .{ep.prev_randao});
+    if (ep.excess_blob_gas != 0) {
+        std.debug.print("    excess_blob_gas = {d}\n", .{ep.excess_blob_gas});
     }
 
-    std.debug.print("  transactions  = {d}\n", .{si.transactions.len});
+    std.debug.print("  transactions  = {d}\n", .{ep.transactions.len});
     if (fork_name) |f| std.debug.print("  fork override = {s}\n", .{f});
 
-    const proof_out = executor.executeBlock(
+    const proof_out = executor.executeBlockStateless(
         allocator,
         pre_state_root,
-        pre_alloc,
         &node_index,
-        si.block,
-        si.transactions,
-        si.withdrawals,
+        si.new_payload_request,
+        si.witness.codes,
         block_hashes.items,
         fork_name,
+        si.chain_config.chain_id,
+        si.public_keys,
     ) catch |err| {
         std.debug.print("  FAIL → {}\n", .{err});
         std.process.exit(1);
@@ -226,21 +182,21 @@ pub fn main() !void {
     std.debug.print("  receipts        = {d}\n", .{proof_out.receipts.len});
     std.debug.print("  pre_state_root  = 0x{x}\n", .{proof_out.pre_state_root});
 
-    const state_ok = std.mem.eql(u8, &proof_out.post_state_root, &si.block.state_root);
-    const receipts_ok = std.mem.eql(u8, &proof_out.receipts_root, &si.block.receipts_root);
+    const state_ok = std.mem.eql(u8, &proof_out.post_state_root, &ep.state_root);
+    const receipts_ok = std.mem.eql(u8, &proof_out.receipts_root, &ep.receipts_root);
 
     if (state_ok) {
         std.debug.print("  post_state_root = 0x{x}  ✓\n", .{proof_out.post_state_root});
     } else {
         std.debug.print("  post_state_root = 0x{x}  ✗  MISMATCH\n", .{proof_out.post_state_root});
-        std.debug.print("  expected        = 0x{x}\n", .{si.block.state_root});
+        std.debug.print("  expected        = 0x{x}\n", .{ep.state_root});
     }
 
     if (receipts_ok) {
         std.debug.print("  receipts_root   = 0x{x}  ✓\n", .{proof_out.receipts_root});
     } else {
         std.debug.print("  receipts_root   = 0x{x}  ✗  MISMATCH\n", .{proof_out.receipts_root});
-        std.debug.print("  expected        = 0x{x}\n", .{si.block.receipts_root});
+        std.debug.print("  expected        = 0x{x}\n", .{ep.receipts_root});
     }
 
     if (!state_ok or !receipts_ok) {
@@ -248,22 +204,30 @@ pub fn main() !void {
         std.process.exit(1);
     }
 
-    // Emit a machine-readable JSON result line to stdout.
-    var out_buf: [512]u8 = undefined;
-    const out = try std.fmt.bufPrint(
-        &out_buf,
-        "{{\"block\":{d},\"valid\":true," ++
-            "\"pre_state_root\":\"0x{x}\"," ++
-            "\"post_state_root\":\"0x{x}\"," ++
-            "\"receipts_root\":\"0x{x}\"}}\n",
-        .{
-            si.block.number,
-            proof_out.pre_state_root,
-            proof_out.post_state_root,
-            proof_out.receipts_root,
+    // Emit output: SSZ 41-byte commitment for SSZ inputs; JSON summary for dev paths.
+    switch (source) {
+        .ssz_stream, .ssz_file => {
+            const ssz_bytes = try ssz_output.serialize(allocator, si.new_payload_request, si.chain_config.chain_id);
+            zkvm_io.write_output(&ssz_bytes);
         },
-    );
-    zkvm_io.write_output(out);
+        else => {
+            var out_buf: [512]u8 = undefined;
+            const out = try std.fmt.bufPrint(
+                &out_buf,
+                "{{\"block\":{d},\"valid\":true," ++
+                    "\"pre_state_root\":\"0x{x}\"," ++
+                    "\"post_state_root\":\"0x{x}\"," ++
+                    "\"receipts_root\":\"0x{x}\"}}\n",
+                .{
+                    ep.block_number,
+                    proof_out.pre_state_root,
+                    proof_out.post_state_root,
+                    proof_out.receipts_root,
+                },
+            );
+            zkvm_io.write_output(out);
+        },
+    }
 
     std.debug.print("\nOK\n", .{});
 }
@@ -287,20 +251,20 @@ fn loadFromJson(allocator: std.mem.Allocator, block_path: []const u8, witness_pa
         return err;
     };
 
-    var wit = json.parseWitnessJson(allocator, witness_json) catch |err| {
+    const wit = json.parseWitnessJson(allocator, witness_json) catch |err| {
         std.debug.print("error: failed to parse {s}: {}\n", .{ witness_path, err });
         std.debug.print("  accepted formats:\n", .{});
         std.debug.print("    {{\"state\":[...],\"codes\":[...],\"keys\":[...],\"headers\":[...]}}  direct\n", .{});
         std.debug.print("    {{\"jsonrpc\":\"2.0\",\"result\":{{...}}}}  JSON-RPC envelope\n", .{});
         return err;
     };
-    wit.state_root = rlp_decode.findPreStateRoot(wit.headers, parsed_block.header.number) orelse parsed_block.header.state_root;
 
     return input.StatelessInput{
-        .block = parsed_block.header,
-        .transactions = parsed_block.transactions,
+        .new_payload_request = .{
+            .execution_payload = input.payloadFromBlock(parsed_block.header, parsed_block.transactions, parsed_block.withdrawals),
+            .parent_beacon_block_root = parsed_block.header.parent_beacon_block_root orelse @splat(0),
+        },
         .witness = wit,
-        .withdrawals = parsed_block.withdrawals,
     };
 }
 
@@ -316,25 +280,3 @@ fn printUsage() void {
     , .{});
 }
 
-fn putStorageSlot(
-    allocator: std.mem.Allocator,
-    pre_alloc: *std.AutoHashMapUnmanaged([20]u8, executor.AllocAccount),
-    node_index: *mpt.NodeIndex,
-    state_root: [32]u8,
-    addr: [20]u8,
-    raw_slot: [32]u8,
-) !void {
-    const acct_state = (try mpt.verifyAccountIndexed(state_root, addr, node_index)) orelse return;
-    const value = try mpt.verifyStorageIndexed(acct_state.storage_root, raw_slot, node_index);
-    if (value != 0) {
-        const entry = try pre_alloc.getOrPut(allocator, addr);
-        if (!entry.found_existing) entry.value_ptr.* = .{};
-        try entry.value_ptr.*.storage.put(allocator, hashToU256(raw_slot), value);
-    }
-}
-
-fn hashToU256(hash: [32]u8) u256 {
-    var result: u256 = 0;
-    for (hash) |b| result = (result << 8) | b;
-    return result;
-}
