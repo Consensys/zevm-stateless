@@ -137,7 +137,9 @@ pub const NewPayloadRequest = struct {
     /// EIP-4844 blob versioned hashes from all transactions in the block.
     /// Populated by the SSZ decoder; empty slice on JSON/RLP paths.
     versioned_hashes: []const primitives.Hash = &.{},
-    // execution_requests: ignored
+    /// EIP-7685 execution requests (withdrawal + consolidation requests).
+    /// Populated by the SSZ decoder; empty slice on JSON/RLP paths.
+    execution_requests: []const []const u8 = &.{},
 };
 
 /// Execution witness (spec-matching Amsterdam ExecutionWitness).

@@ -347,6 +347,40 @@ fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
     return mixInLength(root, hashes.len);
 }
 
+/// ByteList[2^20]: one execution request entry.
+/// limit = 2^20 bytes → ceil(2^20/32) = 2^15 chunk limit → depth 15.
+fn htByteList2_20(data: []const u8) [32]u8 {
+    const chunk_limit_depth = 15;
+    if (data.len == 0) return mixInLength(zeroHash(chunk_limit_depth), 0);
+    const nchunks = (data.len + 31) / 32;
+    if (nchunks <= 32) {
+        var leaf_buf: [32][32]u8 = undefined;
+        for (0..nchunks) |i| {
+            leaf_buf[i] = [_]u8{0} ** 32;
+            const start = i * 32;
+            const end = @min(start + 32, data.len);
+            @memcpy(leaf_buf[i][0 .. end - start], data[start..end]);
+        }
+        const root = sparseRoot(leaf_buf[0..nchunks], chunk_limit_depth);
+        return mixInLength(root, data.len);
+    } else {
+        const root = sparseRootFromBytes(data, chunk_limit_depth);
+        return mixInLength(root, data.len);
+    }
+}
+
+/// hash_tree_root for List[ByteList[2^20], 16] (execution_requests).
+/// limit = 16 → depth 4.
+fn htExecutionRequests(alloc: std.mem.Allocator, requests: []const []const u8) ![32]u8 {
+    const list_depth = 4;
+    if (requests.len == 0) return mixInLength(zeroHash(list_depth), 0);
+    const roots = try alloc.alloc([32]u8, requests.len);
+    defer alloc.free(roots);
+    for (requests, 0..) |req_bytes, i| roots[i] = htByteList2_20(req_bytes);
+    const root = sparseRoot(roots, list_depth);
+    return mixInLength(root, requests.len);
+}
+
 /// Compute the SSZ hash_tree_root of SszNewPayloadRequest.
 /// This is the `new_payload_request_root` field in the output.
 ///
@@ -354,13 +388,12 @@ fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
 ///   execution_payload:        SszExecutionPayload
 ///   versioned_hashes:         List[Bytes32, 4096]
 ///   parent_beacon_block_root: Bytes32
-///   execution_requests:       List[ByteList[2^20], 16] — always empty
+///   execution_requests:       List[ByteList[2^20], 16]
 pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequest) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
     const h1 = htVersionedHashes(req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
-    // execution_requests: List[ByteList[2^20], 16] empty → depth 4
-    const h3 = mixInLength(zeroHash(4), 0);
+    const h3 = try htExecutionRequests(alloc, req.execution_requests);
 
     // merkleize([h0, h1, h2, h3]): 4 chunks, power of 2
     return sha2(sha2(h0, h1), sha2(h2, h3));

@@ -123,7 +123,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     // [0..4]   offset → execution_payload (variable)
     // [4..8]   offset → versioned_hashes (variable)
     // [8..40]  parent_beacon_block_root: Bytes32 (fixed inline)
-    // [40..44] offset → execution_requests (variable, ignored)
+    // [40..44] offset → execution_requests (variable)
     if (npr_data.len < 44) return error.InvalidSsz;
     const off_ep: usize = readU32(npr_data, 0);
     const off_vh: usize = readU32(npr_data, 4);
@@ -143,6 +143,9 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
     const vh_count = vh_bytes.len / 32;
     const versioned_hashes = try alloc.alloc([32]u8, vh_count);
     for (0..vh_count) |i| @memcpy(&versioned_hashes[i], vh_bytes[i * 32 ..][0..32]);
+
+    // execution_requests: List[ByteList[2^20], 16]
+    const execution_requests = try decodeByteListList(alloc, npr_data[off_er..]);
 
     // ── SszExecutionPayload fixed region (540 bytes) ──────────────────────────
     if (ep_data.len < EP_FIXED_SIZE) return error.InvalidSsz;
@@ -261,6 +264,7 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) !input_mod.StatelessIn
             },
             .parent_beacon_block_root = parent_beacon_root,
             .versioned_hashes = versioned_hashes,
+            .execution_requests = execution_requests,
         },
         .witness = .{
             .nodes = nodes,
