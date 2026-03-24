@@ -81,6 +81,7 @@ pub fn computeStateRootDelta(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
     alloc_map: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
+    deleted_accounts: []const types.Address,
     index: *mpt.NodeIndex,
 ) ![32]u8 {
     var state_root = pre_state_root;
@@ -89,25 +90,42 @@ pub fn computeStateRootDelta(
     while (it.next()) |entry| {
         const addr = entry.key_ptr.*;
         const acct = entry.value_ptr.*;
+        std.debug.print("DBG alloc addr: 0x{s} nonce={d} bal={d} sc={d} root_before=0x{s}\n", .{ std.fmt.bytesToHex(addr, .lower), acct.nonce, acct.balance, acct.storage.count(), std.fmt.bytesToHex(state_root, .lower) });
         const addr_key = mpt_builder.keccak256(&addr);
 
         const storage_root = try computeStorageRootIndexed(alloc, addr, pre_state_root, acct, index);
-        const code_hash: [32]u8 = if (acct.code.len > 0)
-            mpt_builder.keccak256(acct.code)
-        else
-            KECCAK_EMPTY;
+        if (acct.storage.count() > 0) {
+            const sr_hex = std.fmt.bytesToHex(storage_root, .lower);
+            std.debug.print("DBG storage_root 0x{s}: 0x{s}\n", .{ std.fmt.bytesToHex(addr, .lower), &sr_hex });
+        }
+        // Use the authoritative code_hash from EVM state when available (set by
+        // extractPostState).  Falls back to computing from code bytes for paths that
+        // do not go through extractPostState (blockchain-test runner pre-alloc).
+        const code_hash: [32]u8 = acct.code_hash orelse
+            if (acct.code.len > 0) mpt_builder.keccak256(acct.code) else KECCAK_EMPTY;
 
         // EIP-161: delete empty accounts (nonce=0, balance=0, no code, empty storage).
+        const has_code = !std.mem.eql(u8, &code_hash, &KECCAK_EMPTY);
         const account_rlp: ?[]const u8 = if (acct.nonce == 0 and
             acct.balance == 0 and
-            acct.code.len == 0 and
+            !has_code and
             std.mem.eql(u8, &storage_root, &mpt_builder.EMPTY_TRIE_HASH))
             null
         else
             try encodeAccountRlp(alloc, acct.nonce, acct.balance, storage_root, code_hash);
 
         try mpt.updateAccountChainedIndexed(alloc, &state_root, addr_key, account_rlp, index);
+        std.debug.print("DBG alloc root_after: 0x{s} (del={}) code_hash=0x{s}\n", .{ std.fmt.bytesToHex(state_root, .lower), account_rlp == null, std.fmt.bytesToHex(code_hash, .lower) });
     }
+
+    // Remove selfdestructed accounts from the trie.
+    for (deleted_accounts) |addr| {
+        std.debug.print("DBG delete addr: 0x{s}\n", .{std.fmt.bytesToHex(addr, .lower)});
+        const addr_key = mpt_builder.keccak256(&addr);
+        try mpt.updateAccountChainedIndexed(alloc, &state_root, addr_key, null, index);
+        std.debug.print("DBG delete root_after: 0x{s}\n", .{std.fmt.bytesToHex(state_root, .lower)});
+    }
+
     return state_root;
 }
 
@@ -132,10 +150,8 @@ pub fn computeStateRoot(
         // storage trie root
         const storage_root = try computeStorageRoot(alloc, acct, pool);
         // code hash
-        const code_hash: [32]u8 = if (acct.code.len > 0)
-            mpt_builder.keccak256(acct.code)
-        else
-            KECCAK_EMPTY;
+        const code_hash: [32]u8 = acct.code_hash orelse
+            if (acct.code.len > 0) mpt_builder.keccak256(acct.code) else KECCAK_EMPTY;
         // account RLP: [nonce, balance, storageRoot, codeHash]
         const value = try encodeAccountRlp(alloc, acct.nonce, acct.balance, storage_root, code_hash);
         items[i] = .{ .key = key, .value = value };
@@ -156,8 +172,17 @@ fn computeStorageRootIndexed(
 ) ![32]u8 {
     const old_root: ?[32]u8 = account.pre_storage_root orelse blk: {
         // Stateless path: auto-fetch storage_root from the account trie.
-        const acct_state = mpt.verifyAccountIndexed(pre_state_root, addr, index) catch null;
-        if (acct_state) |as| break :blk as.storage_root;
+        const acct_state = mpt.verifyAccountIndexed(pre_state_root, addr, index) catch |e| {
+            std.debug.print("DBG verifyAccountIndexed FAIL 0x{s}: {}\n", .{ std.fmt.bytesToHex(addr, .lower), e });
+            break :blk null;
+        };
+        if (acct_state) |as| {
+            const sr_hex = std.fmt.bytesToHex(as.storage_root, .lower);
+            if (account.storage.count() > 0)
+                std.debug.print("DBG verifyAccountIndexed OK 0x{s} storage_count={d} sr=0x{s}\n", .{ std.fmt.bytesToHex(addr, .lower), account.storage.count(), &sr_hex });
+            break :blk as.storage_root;
+        }
+        std.debug.print("DBG verifyAccountIndexed NOT_FOUND 0x{s}\n", .{std.fmt.bytesToHex(addr, .lower)});
         break :blk null; // account not in pre-state → no prior storage
     };
 

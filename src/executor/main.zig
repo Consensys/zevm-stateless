@@ -56,6 +56,8 @@ fn buildEnv(req: input.NewPayloadRequest, block_hashes: []types.BlockHashEntry, 
         .block_hashes = block_hashes,
         .withdrawals = withdrawals,
         .slot_number = ep.slot_number,
+        .gas_used_header = ep.gas_used,
+        .blob_gas_used_header = ep.blob_gas_used,
     };
 }
 
@@ -66,7 +68,7 @@ fn finalizeOutput(
     node_index: *mpt.NodeIndex,
     spec: primitives.SpecId,
 ) !output.ProofOutput {
-    const post_state_root = try output_mod.computeStateRootDelta(alloc, pre_state_root, result.alloc, node_index);
+    const post_state_root = try output_mod.computeStateRootDelta(alloc, pre_state_root, result.alloc, result.deleted_accounts, node_index);
     const receipts_root = try output_mod.computeReceiptsRoot(alloc, result.receipts);
     const receipts_data = try alloc.alloc(output.ReceiptData, result.receipts.len);
     for (result.receipts, 0..) |r, i| {
@@ -163,6 +165,13 @@ pub fn executeBlockStateless(
 
     // Wire WitnessDatabase as fallback on an empty InMemoryDB.
     // All account/storage reads during EVM execution are served via live MPT proof verification.
+    {
+        const mpt_local = @import("mpt");
+        for (witness_codes, 0..) |code, ci| {
+            const h = mpt_local.keccak256(code);
+            std.debug.print("DBG witness_code[{}] hash=0x{s} len={}\n", .{ ci, std.fmt.bytesToHex(h, .lower), code.len });
+        }
+    }
     var witness_db = db_mod.WitnessDatabase.init(node_index, pre_state_root, witness_codes, block_hashes);
     var db = database_mod.InMemoryDB.init(alloc);
     db.fallback = witness_db.buildFallback();
@@ -194,7 +203,12 @@ pub fn executeStatelessInput(
 ) !output.ProofOutput {
     const ep = &si.new_payload_request.execution_payload;
 
-    const pre_state_root = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number) orelse ep.state_root;
+    const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
+    const pre_state_root = pre_state_root_raw orelse ep.state_root;
+    {
+        const pr = std.fmt.bytesToHex(pre_state_root, .lower);
+        std.debug.print("DBG block={d} pre_state_root=0x{s} found={}\n", .{ ep.block_number, &pr, pre_state_root_raw != null });
+    }
 
     var node_index = try mpt.buildNodeIndex(alloc, si.witness.nodes);
     defer node_index.deinit();

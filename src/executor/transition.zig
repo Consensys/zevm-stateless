@@ -31,6 +31,7 @@ pub const Receipt = input.Receipt;
 
 pub const TransitionResult = struct {
     alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    deleted_accounts: []input.Address,
     receipts: []Receipt,
     cumulative_gas: u64,
     block_bloom: input.Bloom,
@@ -451,6 +452,7 @@ pub fn transitionWithDb(
                 break :blk n * 131_072 * max_blob_fee;
             } else 0;
             const max_cost = max_gas_fee + tx.value + blob_cost;
+            std.debug.print("DBG balance_check type={} blob_cost={} max_gas_fee={} tx_val={} max_cost={} balance={} n={} mfpbg={}\n", .{ tx.type, blob_cost, max_gas_fee, tx.value, max_cost, sender_info.balance, tx.blob_versioned_hashes.len, tx.max_fee_per_blob_gas orelse 0 });
             if (sender_info.balance < max_cost) {
                 ctx.journaled_state.discardTx();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
@@ -597,8 +599,20 @@ pub fn transitionWithDb(
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc_in, &ctx);
 
+    // Collect selfdestructed accounts for delta-root deletion
+    var deleted = std.ArrayListUnmanaged(input.Address){};
+    {
+        var del_it = ctx.journaled_state.inner.evm_state.iterator();
+        while (del_it.next()) |e| {
+            if (e.value_ptr.*.status.self_destructed) {
+                try deleted.append(arena, e.key_ptr.*);
+            }
+        }
+    }
+
     return TransitionResult{
         .alloc = post_alloc,
+        .deleted_accounts = try deleted.toOwnedSlice(arena),
         .receipts = try receipts.toOwnedSlice(arena),
         .cumulative_gas = cumulative_gas,
         .block_bloom = block_bloom,
@@ -649,6 +663,7 @@ fn extractPostState(
 
         // Skip accounts that were loaded as non-existent and never touched
         if (account.status.loaded_as_not_existing and !account.status.touched) continue;
+        std.debug.print("DBG evm_state 0x{s} bal={d} nonce={d} touched={} created={} sd={} lne={}\n", .{ std.fmt.bytesToHex(addr, .lower), account.info.balance, account.info.nonce, account.status.touched, account.status.created, account.status.self_destructed, account.status.loaded_as_not_existing });
 
         // Remove self-destructed accounts
         if (account.status.self_destructed) {
@@ -668,11 +683,13 @@ fn extractPostState(
 
         acct.balance = account.info.balance;
         acct.nonce = account.info.nonce;
+        // Always record the authoritative code hash from EVM state.
+        // computeStateRootDelta() uses this directly so that accounts whose code
+        // bytes are absent from the witness still produce the correct account RLP.
+        acct.code_hash = account.info.code_hash;
 
         // Update code: use code_hash as the source of truth.
         // KECCAK_EMPTY means empty code; otherwise look up actual bytes.
-        // Note: Bytecode.new() (default/empty in zevm) has originalBytes() = &[0x00]
-        // even though the account has no code — so we must check code_hash first.
         // IMPORTANT: Eip7702Bytecode.raw() returns &self.raw_bytes where self is a value
         // parameter, so it returns a dangling pointer when called on a copy. For EIP-7702
         // bytecode we construct the bytes directly from the address field instead.
@@ -729,8 +746,14 @@ fn extractPostState(
         }
 
         // EIP-161 (Spurious Dragon+): remove empty accounts from state.
+        // Use code_hash (authoritative) rather than code.len to detect empty code —
+        // code bytes may be absent from the witness even for non-empty contracts.
         if (primitives.isEnabledIn(ctx.cfg.spec, .spurious_dragon)) {
-            if (acct.nonce == 0 and acct.balance == 0 and acct.code.len == 0 and acct.storage.count() == 0) {
+            const has_code = if (acct.code_hash) |ch|
+                !std.mem.eql(u8, &ch, &primitives.KECCAK_EMPTY)
+            else
+                acct.code.len > 0;
+            if (acct.nonce == 0 and acct.balance == 0 and !has_code and acct.storage.count() == 0) {
                 _ = post.remove(addr);
                 continue;
             }

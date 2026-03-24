@@ -72,6 +72,7 @@ pub const WitnessDatabase = struct {
         ) catch return DbError.InvalidWitness;
 
         const as = account_state orelse return null;
+        std.debug.print("DBG basic 0x{s} code_hash=0x{s}\n", .{ std.fmt.bytesToHex(address, .lower), std.fmt.bytesToHex(as.code_hash, .lower) });
         return state.AccountInfo{
             .balance = as.balance,
             .nonce = as.nonce,
@@ -92,6 +93,7 @@ pub const WitnessDatabase = struct {
                 return bytecode.Bytecode.newLegacy(code_bytes);
             }
         }
+        std.debug.print("DBG codeByHash MISS 0x{s} (codes_len={})\n", .{ std.fmt.bytesToHex(code_hash, .lower), self.codes.len });
         return bytecode.Bytecode.new();
     }
 

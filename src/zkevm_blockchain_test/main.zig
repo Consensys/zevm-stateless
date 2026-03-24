@@ -187,6 +187,9 @@ fn runBlock(
             break :blk false;
         };
         if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) {
+            const got_hex = std.fmt.bytesToHex(proof.post_state_root, .lower);
+            const exp_hex = std.fmt.bytesToHex(ep.state_root, .lower);
+            std.debug.print("DBG StateRootMismatch {s}[{}]\n  got: 0x{s}\n  exp: 0x{s}\n", .{ test_name, block_idx, &got_hex, &exp_hex });
             exec_err = error.StateRootMismatch;
             break :blk false;
         }
@@ -214,6 +217,6 @@ fn runBlock(
         return false;
     }
 
-    _ = quiet;
+    if (!quiet) std.debug.print("PASS {s}[{}]\n", .{ test_name, block_idx });
     return true;
 }

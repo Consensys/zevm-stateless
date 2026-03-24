@@ -22,6 +22,11 @@ pub const AllocAccount = struct {
     /// and 0-valued entries indicate deletions.  computeStorageRoot() applies these
     /// deltas to this root instead of building a new trie from scratch.
     pre_storage_root: ?[32]u8 = null,
+    /// Authoritative code hash from EVM state.  Set by extractPostState() so that
+    /// computeStateRootDelta() uses the correct hash even when `code` bytes are absent
+    /// (e.g. a touched contract whose code is not included in the stateless witness).
+    /// When null, the hash is computed from `code` (backwards-compatible).
+    code_hash: ?[32]u8 = null,
 };
 
 pub const AccessListEntry = struct {
