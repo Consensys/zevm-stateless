@@ -207,7 +207,7 @@ pub fn main() !void {
     // Emit output: SSZ 41-byte commitment for SSZ inputs; JSON summary for dev paths.
     switch (source) {
         .ssz_stream, .ssz_file => {
-            const ssz_bytes = try ssz_output.serialize(allocator, si.new_payload_request, si.chain_config.chain_id);
+            const ssz_bytes = try ssz_output.serialize(allocator, si.new_payload_request, si.chain_config.chain_id, true);
             zkvm_io.write_output(&ssz_bytes);
         },
         else => {
@@ -279,4 +279,3 @@ fn printUsage() void {
         \\
     , .{});
 }
-

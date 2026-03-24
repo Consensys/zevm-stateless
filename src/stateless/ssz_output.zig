@@ -144,7 +144,7 @@ fn htByteList2_24(data: []const u8) [32]u8 {
             leaf_buf[i] = [_]u8{0} ** 32;
             const start = i * 32;
             const end = @min(start + 32, data.len);
-            @memcpy(leaf_buf[i][0..end - start], data[start..end]);
+            @memcpy(leaf_buf[i][0 .. end - start], data[start..end]);
         }
         const root = sparseRoot(leaf_buf[0..nchunks], chunk_limit_depth);
         return mixInLength(root, data.len);
@@ -168,7 +168,7 @@ fn htByteList2_30(tx_bytes: []const u8) [32]u8 {
             leaf_buf[i] = [_]u8{0} ** 32;
             const start = i * 32;
             const end = @min(start + 32, tx_bytes.len);
-            @memcpy(leaf_buf[i][0..end - start], tx_bytes[start..end]);
+            @memcpy(leaf_buf[i][0 .. end - start], tx_bytes[start..end]);
         }
         const root = sparseRoot(leaf_buf[0..nchunks], chunk_limit_depth);
         return mixInLength(root, tx_bytes.len);
@@ -201,7 +201,7 @@ fn sparseRootFromBytes(data: []const u8, depth: u8) [32]u8 {
         var chunk: [32]u8 = [_]u8{0} ** 32;
         const start = i * 32;
         const end = @min(start + 32, data.len);
-        @memcpy(chunk[0..end - start], data[start..end]);
+        @memcpy(chunk[0 .. end - start], data[start..end]);
 
         var node = chunk;
         var level: u8 = 0;
@@ -214,20 +214,29 @@ fn sparseRootFromBytes(data: []const u8, depth: u8) [32]u8 {
     }
 
     // Fold remaining stack entries up to `depth`.
+    // Track result_height so we pad with the correct zero-subtree size before
+    // combining with a higher-level stack entry.
     var result: [32]u8 = [_]u8{0} ** 32;
     var found = false;
+    var result_height: u8 = 0;
     for (0..@as(usize, depth) + 1) |lv| {
         const level: u8 = @intCast(lv);
         if (stack_filled[level]) {
             if (!found) {
                 result = stack[level];
+                result_height = level;
                 found = true;
             } else {
+                // Pad result up to height `level` before combining.
+                while (result_height < level) : (result_height += 1) {
+                    result = sha2(result, zeroHash(result_height));
+                }
                 result = sha2(stack[level], result);
+                result_height = level + 1;
             }
-            stack_filled[level] = false;
-        } else if (found) {
-            result = sha2(result, zeroHash(level));
+        } else if (found and result_height < depth) {
+            result = sha2(result, zeroHash(result_height));
+            result_height += 1;
         }
     }
 
@@ -329,18 +338,26 @@ fn htWithdrawalList(alloc: std.mem.Allocator, withdrawals: []const input.Withdra
 
 // ── SszNewPayloadRequest hash_tree_root ───────────────────────────────────────
 
+/// hash_tree_root for List[Bytes32, 4096] (versioned_hashes).
+/// limit = 4096 → depth 12. Elements are already 32-byte chunks.
+fn htVersionedHashes(hashes: []const [32]u8) [32]u8 {
+    const list_depth = 12;
+    if (hashes.len == 0) return mixInLength(zeroHash(list_depth), 0);
+    const root = sparseRoot(hashes, list_depth);
+    return mixInLength(root, hashes.len);
+}
+
 /// Compute the SSZ hash_tree_root of SszNewPayloadRequest.
 /// This is the `new_payload_request_root` field in the output.
 ///
 /// SszNewPayloadRequest has 4 fields (already power of 2):
-///   execution_payload:       SszExecutionPayload
-///   versioned_hashes:        List[Bytes32, 4096]    — always empty
+///   execution_payload:        SszExecutionPayload
+///   versioned_hashes:         List[Bytes32, 4096]
 ///   parent_beacon_block_root: Bytes32
-///   execution_requests:      List[ByteList[2^20], 16] — always empty
+///   execution_requests:       List[ByteList[2^20], 16] — always empty
 pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequest) ![32]u8 {
     const h0 = try htExecutionPayload(alloc, req.execution_payload);
-    // versioned_hashes: List[Bytes32, 4096] empty → depth 12
-    const h1 = mixInLength(zeroHash(12), 0);
+    const h1 = htVersionedHashes(req.versioned_hashes);
     const h2 = htBytes32(req.parent_beacon_block_root);
     // execution_requests: List[ByteList[2^20], 16] empty → depth 4
     const h3 = mixInLength(zeroHash(4), 0);
@@ -353,17 +370,18 @@ pub fn newPayloadRequestRoot(alloc: std.mem.Allocator, req: input.NewPayloadRequ
 
 /// Serialize SszStatelessValidationResult to 41 bytes:
 ///   [0..32]  new_payload_request_root
-///   [32]     successful_validation (0x01)
+///   [32]     successful_validation (0x01 = valid, 0x00 = invalid)
 ///   [33..41] chain_config.chain_id (uint64 LE)
 pub fn serialize(
     alloc: std.mem.Allocator,
     req: input.NewPayloadRequest,
     chain_id: u64,
+    successful_validation: bool,
 ) ![41]u8 {
     const root = try newPayloadRequestRoot(alloc, req);
     var out: [41]u8 = undefined;
     @memcpy(out[0..32], &root);
-    out[32] = 0x01; // successful_validation = true
+    out[32] = if (successful_validation) 0x01 else 0x00;
     std.mem.writeInt(u64, out[33..41], chain_id, .little);
     return out;
 }

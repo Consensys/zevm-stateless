@@ -89,7 +89,6 @@ pub const BlockHeader = struct {
     slot_number: ?u64 = null, // [21]
 };
 
-
 /// EIP-4895 withdrawal (Shanghai+).
 pub const Withdrawal = struct {
     index: u64,
@@ -135,7 +134,10 @@ pub const ExecutionPayload = struct {
 pub const NewPayloadRequest = struct {
     execution_payload: ExecutionPayload,
     parent_beacon_block_root: primitives.Hash,
-    // versioned_hashes, execution_requests: ignored
+    /// EIP-4844 blob versioned hashes from all transactions in the block.
+    /// Populated by the SSZ decoder; empty slice on JSON/RLP paths.
+    versioned_hashes: []const primitives.Hash = &.{},
+    // execution_requests: ignored
 };
 
 /// Execution witness (spec-matching Amsterdam ExecutionWitness).

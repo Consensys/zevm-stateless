@@ -49,8 +49,7 @@ pub fn main() !void {
     var failed: u64 = 0;
 
     if (single_file) |path| {
-        const ok = processFile(allocator, path, quiet) catch false;
-        if (ok) passed += 1 else failed += 1;
+        processFile(allocator, path, quiet, &passed, &failed) catch {};
     } else {
         var dir = std.fs.cwd().openDir(fixtures_dir, .{ .iterate = true }) catch |err| {
             std.debug.print("error: cannot open fixtures dir '{s}': {}\n", .{ fixtures_dir, err });
@@ -83,11 +82,9 @@ pub fn main() !void {
             const full_path = try std.fs.path.join(allocator, &.{ fixtures_dir, rel_path });
             defer allocator.free(full_path);
 
-            const ok = processFile(allocator, full_path, quiet) catch false;
-            if (ok) passed += 1 else {
-                failed += 1;
-                if (stop_on_fail) break;
-            }
+            const failed_before = failed;
+            processFile(allocator, full_path, quiet, &passed, &failed) catch {};
+            if (stop_on_fail and failed > failed_before) break;
         }
     }
 
@@ -101,25 +98,24 @@ pub fn main() !void {
     if (failed > 0) std.process.exit(1);
 }
 
-fn processFile(allocator: std.mem.Allocator, path: []const u8, quiet: bool) !bool {
+fn processFile(allocator: std.mem.Allocator, path: []const u8, quiet: bool, passed: *u64, failed: *u64) !void {
     var arena = std.heap.ArenaAllocator.init(allocator);
     defer arena.deinit();
     const alloc = arena.allocator();
 
     const json_text = std.fs.cwd().readFileAlloc(alloc, path, 256 * 1024 * 1024) catch |err| {
         std.debug.print("error: cannot read '{s}': {}\n", .{ path, err });
-        return false;
+        return;
     };
 
     var parsed = std.json.parseFromSlice(std.json.Value, alloc, json_text, .{}) catch |err| {
         std.debug.print("error: JSON parse failed in '{s}': {}\n", .{ path, err });
-        return false;
+        return;
     };
     defer parsed.deinit();
 
-    if (parsed.value != .object) return false;
+    if (parsed.value != .object) return;
 
-    var all_ok = true;
     var it = parsed.value.object.iterator();
     while (it.next()) |kv| {
         const test_name = kv.key_ptr.*;
@@ -137,6 +133,7 @@ fn processFile(allocator: std.mem.Allocator, path: []const u8, quiet: bool) !boo
         const blocks_val = test_case.object.get("blocks") orelse continue;
         if (blocks_val != .array) continue;
 
+        var test_ok = true;
         for (blocks_val.array.items, 0..) |block_val, block_idx| {
             if (block_val != .object) continue;
             const in_hex = switch (block_val.object.get("statelessInputBytes") orelse continue) {
@@ -152,11 +149,10 @@ fn processFile(allocator: std.mem.Allocator, path: []const u8, quiet: bool) !boo
                 std.debug.print("FAIL {s}[{}]  error: {}\n", .{ test_name, block_idx, err });
                 break :blk false;
             };
-            if (!ok) all_ok = false;
+            if (!ok) test_ok = false;
         }
+        if (test_ok) passed.* += 1 else failed.* += 1;
     }
-
-    return all_ok;
 }
 
 fn runBlock(
@@ -181,18 +177,16 @@ fn runBlock(
     const si = try ssz_decode.decode(alloc, input_bytes);
     const ep = &si.new_payload_request.execution_payload;
 
-    const proof = try executor.executeStatelessInput(alloc, si, fork_name);
+    // successful_validation mirrors spec: True iff execution succeeds AND
+    // post_state_root and receipts_root match the expected values in the payload.
+    const successful_validation = blk: {
+        const proof = executor.executeStatelessInput(alloc, si, fork_name) catch break :blk false;
+        if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) break :blk false;
+        if (!std.mem.eql(u8, &proof.receipts_root, &ep.receipts_root)) break :blk false;
+        break :blk true;
+    };
 
-    if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) {
-        std.debug.print("FAIL {s}[{}]  post_state_root mismatch\n", .{ test_name, block_idx });
-        return false;
-    }
-    if (!std.mem.eql(u8, &proof.receipts_root, &ep.receipts_root)) {
-        std.debug.print("FAIL {s}[{}]  receipts_root mismatch\n", .{ test_name, block_idx });
-        return false;
-    }
-
-    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id);
+    const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, successful_validation);
     if (!std.mem.eql(u8, &computed, &expected)) {
         const got_hex = std.fmt.bytesToHex(computed, .lower);
         const exp_hex = std.fmt.bytesToHex(expected, .lower);

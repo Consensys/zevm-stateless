@@ -137,7 +137,15 @@ pub fn executeBlockStateless(
 
     const empty_pre_alloc = std.AutoHashMapUnmanaged(types.Address, types.AllocAccount){};
     const result = try transition_mod.transitionWithDb(
-        alloc, db, empty_pre_alloc, env, txs, spec, chain_id, fork_mod.blockReward(spec), public_keys,
+        alloc,
+        db,
+        empty_pre_alloc,
+        env,
+        txs,
+        spec,
+        chain_id,
+        fork_mod.blockReward(spec),
+        public_keys,
     );
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);
 }
