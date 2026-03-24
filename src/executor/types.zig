@@ -72,6 +72,12 @@ pub const Env = struct {
     /// EIP-7843 (Amsterdam+): beacon chain slot number.
     /// `null` when the block header does not carry a slot number (pre-Amsterdam).
     slot_number: ?u64 = null,
+    /// Block header's declared gasUsed field. When set, validated post-execution
+    /// against the actual cumulative gas used by all transactions.
+    gas_used_header: ?u64 = null,
+    /// Block header's declared blobGasUsed field (Cancun+). When set, validated
+    /// post-execution against the actual blob gas consumed by type-3 transactions.
+    blob_gas_used_header: ?u64 = null,
 };
 
 // ─── Receipt / log types ──────────────────────────────────────────────────────

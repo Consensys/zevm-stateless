@@ -24,6 +24,7 @@ const tx_decode = @import("executor_tx_decode");
 const types = @import("executor_types");
 const db_mod = @import("db");
 const database_mod = @import("database");
+const block_validation = @import("executor_block_validation");
 
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
@@ -82,6 +83,35 @@ fn finalizeOutput(
 
 // ─── Public API ───────────────────────────────────────────────────────────────
 
+pub const ExecuteBlockResult = struct {
+    post_state_root: [32]u8,
+    receipts_root: [32]u8,
+    post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
+    receipts: []transition_mod.Receipt,
+};
+
+pub fn executeBlockFromAlloc(
+    alloc: std.mem.Allocator,
+    pre_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
+    env: types.Env,
+    txs: []types.TxInput,
+    spec: primitives.SpecId,
+    chain_id: u64,
+    reward: i64,
+) !ExecuteBlockResult {
+    try block_validation.validateBlock(env, spec);
+    const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, chain_id, reward);
+    try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used);
+    const post_state_root = try output_mod.computeStateRoot(alloc, result.alloc, &.{});
+    const receipts_root = try output_mod.computeReceiptsRoot(alloc, result.receipts);
+    return .{
+        .post_state_root = post_state_root,
+        .receipts_root = receipts_root,
+        .post_alloc = result.alloc,
+        .receipts = result.receipts,
+    };
+}
+
 pub fn executeBlock(
     alloc: std.mem.Allocator,
     pre_state_root: [32]u8,
@@ -98,6 +128,7 @@ pub fn executeBlock(
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
     const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals));
+    try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
     const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, 1, fork_mod.blockReward(spec));
     return finalizeOutput(alloc, pre_state_root, result, index, spec);
@@ -127,6 +158,7 @@ pub fn executeBlockStateless(
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
     const env = buildEnv(req, block_hashes, try mapWithdrawals(alloc, ep.withdrawals));
+    try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
     // Wire WitnessDatabase as fallback on an empty InMemoryDB.
@@ -147,6 +179,7 @@ pub fn executeBlockStateless(
         fork_mod.blockReward(spec),
         public_keys,
     );
+    try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);
 }
 

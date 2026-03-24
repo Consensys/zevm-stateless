@@ -29,22 +29,15 @@ const system_calls = @import("system_calls.zig");
 pub const Log = input.Log;
 pub const Receipt = input.Receipt;
 
-pub const RejectedTx = struct {
-    index: usize,
-    err: []const u8,
-};
-
 pub const TransitionResult = struct {
     alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     receipts: []Receipt,
-    rejected: []RejectedTx,
     cumulative_gas: u64,
     block_bloom: input.Bloom,
     // Derived after execution
     current_base_fee: ?u64,
     excess_blob_gas: ?u64,
     blob_gas_used: u64,
-    // Accepted txs only (rejected txs excluded, used for txRoot computation)
     accepted_txs: []input.TxInput,
     chain_id: u64,
 };
@@ -194,7 +187,6 @@ pub fn transitionWithDb(
     system_calls.applyPreBlockCalls(&ctx, &instructions, &precompiles, env, spec, chain_id);
 
     var receipts = std.ArrayListUnmanaged(Receipt){};
-    var rejected = std.ArrayListUnmanaged(RejectedTx){};
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput){};
     var cumulative_gas: u64 = 0; // block gas (max(regular, state) per tx, for block header gasUsed)
     var cumulative_receipt_gas: u64 = 0; // receipt gas (regular + state per tx, for cumulativeGasUsed)
@@ -239,11 +231,7 @@ pub fn transitionWithDb(
         if (maybe_sender) |s| {
             sender = s;
         } else {
-            try rejected.append(arena, .{
-                .index = tx_idx,
-                .err = "could not determine sender (missing signature)",
-            });
-            continue;
+            return error.MissingSenderSignature;
         }
 
         // 1b. Validate tx type is supported by the current fork
@@ -257,22 +245,40 @@ pub fn transitionWithDb(
                 else => false,
             };
             if (!type_supported) {
-                try rejected.append(arena, .{
-                    .index = tx_idx,
-                    .err = "transaction type not supported by this fork",
-                });
-                continue;
+                return switch (tx.type) {
+                    1 => error.Type1TxPreFork,
+                    2 => error.Type2TxPreFork,
+                    3 => error.Type3TxPreFork,
+                    4 => error.Type4TxPreFork,
+                    else => error.TypeUnknownTxPreFork,
+                };
             }
         }
 
-        // 1c. EIP-7825 (Osaka through BPO2): max gas limit per transaction = 2^24
-        // Amsterdam supersedes EIP-7825 via the EIP-8037 reservoir model (no hard cap).
-        if (primitives.isEnabledIn(spec, .osaka) and !primitives.isEnabledIn(spec, .amsterdam) and tx.gas > 0x01000000) {
-            try rejected.append(arena, .{
-                .index = tx_idx,
-                .err = "gas limit exceeds EIP-7825 maximum (2^24)",
-            });
-            continue;
+        // 1c. EIP-7825 (Osaka+): max gas limit per transaction = TX_GAS_LIMIT_CAP
+        if (primitives.isEnabledIn(spec, .osaka) and !primitives.isEnabledIn(spec, .amsterdam) and tx.gas > primitives.TX_GAS_LIMIT_CAP) {
+            return error.GasLimitExceedsCap;
+        }
+
+        // 1d. Transaction gas limit cannot exceed block gas limit.
+        if (tx.gas > env.gas_limit) {
+            return error.TxGasLimitExceedsBlockLimit;
+        }
+
+        // 1e. Type-3 blob pre-checks (EIP-4844 / EIP-7594).
+        // Per-block gas limit check must come BEFORE per-tx count check:
+        // blob_count > per_block_max → BlobGasLimitExceeded (TYPE_3_TX_MAX_BLOB_GAS_ALLOWANCE_EXCEEDED)
+        // per_tx_max < blob_count <= per_block_max → TooManyBlobs (TYPE_3_TX_BLOB_COUNT_EXCEEDED)
+        if (tx.type == 3) {
+            const blobs: u64 = @intCast(tx.blob_versioned_hashes.len);
+            const tx_blob_gas = blobs * primitives.GAS_PER_BLOB;
+            if (max_blob_gas_per_block > 0 and total_blob_gas + tx_blob_gas > max_blob_gas_per_block) {
+                return error.BlobGasLimitExceeded;
+            }
+            // EIP-7594 (Osaka+): per-tx blob count limit = 6, independent of per-block max
+            if (primitives.isEnabledIn(spec, .osaka) and blobs > primitives.MAX_BLOB_NUMBER_PER_TX) {
+                return error.Eip7594TooManyBlobsPerTx;
+            }
         }
 
         // 2. Compute tx hash
@@ -368,8 +374,11 @@ pub fn transitionWithDb(
         if (tx.data.len > 0) {
             var data_list = std.ArrayList(u8){};
             data_list.appendSlice(alloc_mod.get(), tx.data) catch {
-                try rejected.append(arena, .{ .index = tx_idx, .err = "alloc error for tx data" });
-                continue;
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
+                ctx.tx.blob_hashes = null;
+                if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
+                ctx.tx.authorization_list = null;
+                return error.OutOfMemory;
             };
             ctx.tx.data = data_list;
         }
@@ -396,14 +405,13 @@ pub fn transitionWithDb(
         // EIP-7702: type 4 with empty authorization list is invalid.
         if (tx.type == 4 and tx.authorization_list.len == 0) {
             ctx.journaled_state.discardTx();
-            try rejected.append(arena, .{ .index = tx_idx, .err = "type 4 transaction with empty authorization list" });
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
             if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
             ctx.tx.blob_hashes = null;
             ctx.tx.authorization_list = null;
-            continue;
+            return error.EmptyAuthorizationList;
         }
 
         // 3b. Pre-validate sender state — zevm's ExecuteEvm.execute() swallows
@@ -413,8 +421,6 @@ pub fn transitionWithDb(
         {
             const sender_load = ctx.journaled_state.loadAccount(sender) catch |err| {
                 ctx.journaled_state.discardTx();
-                const err_msg = std.fmt.allocPrint(arena, "load sender: {}", .{err}) catch "load error";
-                try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -422,14 +428,12 @@ pub fn transitionWithDb(
                 ctx.tx.blob_hashes = null;
                 if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
-                continue;
+                return err;
             };
             const sender_info = sender_load.data.info;
             const tx_nonce = tx.nonce orelse 0;
             if (sender_info.nonce != tx_nonce) {
                 ctx.journaled_state.discardTx();
-                const err_msg = std.fmt.allocPrint(arena, "nonce mismatch: have {}, want {}", .{ sender_info.nonce, tx_nonce }) catch "nonce error";
-                try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -437,7 +441,7 @@ pub fn transitionWithDb(
                 ctx.tx.blob_hashes = null;
                 if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
-                continue;
+                return if (sender_info.nonce > tx_nonce) error.NonceMismatch else error.NonceMismatchTooHigh;
             }
             const egp_check = effectiveGasPrice(tx, env.base_fee orelse 0);
             const max_gas_fee: u256 = @as(u256, tx.gas) * @as(u256, egp_check);
@@ -449,8 +453,6 @@ pub fn transitionWithDb(
             const max_cost = max_gas_fee + tx.value + blob_cost;
             if (sender_info.balance < max_cost) {
                 ctx.journaled_state.discardTx();
-                const err_msg = std.fmt.allocPrint(arena, "insufficient funds: have {}, need {}", .{ sender_info.balance, max_cost }) catch "balance error";
-                try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -458,7 +460,7 @@ pub fn transitionWithDb(
                 ctx.tx.blob_hashes = null;
                 if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
                 ctx.tx.authorization_list = null;
-                continue;
+                return error.InsufficientBalance;
             }
         }
 
@@ -475,9 +477,7 @@ pub fn transitionWithDb(
             ctx.tx.blob_hashes = null;
             if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
             ctx.tx.authorization_list = null;
-            const err_msg = std.fmt.allocPrint(arena, "{}", .{err}) catch "execution error";
-            try rejected.append(arena, .{ .index = tx_idx, .err = err_msg });
-            continue;
+            return err;
         };
 
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
@@ -526,17 +526,9 @@ pub fn transitionWithDb(
         }
         _ = logs_start;
 
-        // Blob gas tracking + per-block limit enforcement.
+        // Blob gas accumulation (limit checks were done pre-execution in 1e).
         if (tx.type == 3) {
-            const blobs: u64 = @intCast(tx.blob_versioned_hashes.len);
-            const tx_blob_gas = blobs * primitives.GAS_PER_BLOB;
-            if (max_blob_gas_per_block > 0 and
-                tx_blob_gas <= max_blob_gas_per_block and
-                total_blob_gas + tx_blob_gas > max_blob_gas_per_block)
-            {
-                return error.BlobGasLimitExceeded;
-            }
-            total_blob_gas += tx_blob_gas;
+            total_blob_gas += @as(u64, @intCast(tx.blob_versioned_hashes.len)) * primitives.GAS_PER_BLOB;
         }
 
         try receipts.append(arena, Receipt{
@@ -608,7 +600,6 @@ pub fn transitionWithDb(
     return TransitionResult{
         .alloc = post_alloc,
         .receipts = try receipts.toOwnedSlice(arena),
-        .rejected = try rejected.toOwnedSlice(arena),
         .cumulative_gas = cumulative_gas,
         .block_bloom = block_bloom,
         .current_base_fee = env.base_fee,

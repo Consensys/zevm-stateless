@@ -15,6 +15,7 @@ const std = @import("std");
 const ssz_decode = @import("ssz_decode");
 const ssz_output = @import("ssz_output");
 const executor = @import("executor");
+const executor_exceptions = @import("executor_exceptions");
 
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
@@ -179,21 +180,40 @@ fn runBlock(
 
     // successful_validation mirrors spec: True iff execution succeeds AND
     // post_state_root and receipts_root match the expected values in the payload.
+    var exec_err: anyerror = error.Success;
     const successful_validation = blk: {
-        const proof = executor.executeStatelessInput(alloc, si, fork_name) catch break :blk false;
-        if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) break :blk false;
-        if (!std.mem.eql(u8, &proof.receipts_root, &ep.receipts_root)) break :blk false;
+        const proof = executor.executeStatelessInput(alloc, si, fork_name) catch |err| {
+            exec_err = err;
+            break :blk false;
+        };
+        if (!std.mem.eql(u8, &proof.post_state_root, &ep.state_root)) {
+            exec_err = error.StateRootMismatch;
+            break :blk false;
+        }
+        if (!std.mem.eql(u8, &proof.receipts_root, &ep.receipts_root)) {
+            exec_err = error.ReceiptsRootMismatch;
+            break :blk false;
+        }
         break :blk true;
     };
 
     const computed = try ssz_output.serialize(alloc, si.new_payload_request, si.chain_config.chain_id, successful_validation);
     if (!std.mem.eql(u8, &computed, &expected)) {
-        const got_hex = std.fmt.bytesToHex(computed, .lower);
-        const exp_hex = std.fmt.bytesToHex(expected, .lower);
-        std.debug.print("FAIL {s}[{}]  output mismatch\n  got:      0x{s}\n  expected: 0x{s}\n", .{ test_name, block_idx, &got_hex, &exp_hex });
+        const got_valid = computed[32] == 0x01;
+        const expected_valid = expected[32] == 0x01;
+        if (expected_valid and !got_valid) {
+            const exc_name = executor_exceptions.mapBlockError(exec_err) orelse executor_exceptions.mapTransactionError(exec_err);
+            std.debug.print("FAIL {s}[{}]  expected valid, got invalid: {s}\n", .{ test_name, block_idx, exc_name });
+        } else if (!expected_valid and got_valid) {
+            std.debug.print("FAIL {s}[{}]  expected invalid, got valid\n", .{ test_name, block_idx });
+        } else {
+            const got_hex = std.fmt.bytesToHex(computed, .lower);
+            const exp_hex = std.fmt.bytesToHex(expected, .lower);
+            std.debug.print("FAIL {s}[{}]  output mismatch\n  got:      0x{s}\n  expected: 0x{s}\n", .{ test_name, block_idx, &got_hex, &exp_hex });
+        }
         return false;
     }
 
-    if (!quiet) std.debug.print("PASS {s}[{}]\n", .{ test_name, block_idx });
+    _ = quiet;
     return true;
 }

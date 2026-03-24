@@ -11,13 +11,26 @@
 const std = @import("std");
 const hardfork = @import("hardfork");
 const executor_types = @import("executor_types");
-const executor_transition = @import("executor_transition");
-const executor_output = @import("executor_output");
+const executor_exceptions = @import("executor_exceptions");
+const executor = @import("executor");
 const executor_tx_decode = @import("executor_tx_decode");
 const mpt = @import("mpt");
 
 const json_helpers = @import("json.zig");
 const output = @import("output.zig");
+
+// ─── Exception matching ───────────────────────────────────────────────────────
+
+/// Returns true if `actual` matches any alternative in `expected`.
+/// The `expected` string may contain `|`-separated alternatives
+/// (e.g. "TransactionException.A|TransactionException.B").
+fn matchesException(expected: []const u8, actual: []const u8) bool {
+    var it = std.mem.splitScalar(u8, expected, '|');
+    while (it.next()) |candidate| {
+        if (std.mem.eql(u8, std.mem.trim(u8, candidate, " "), actual)) return true;
+    }
+    return false;
+}
 
 const Address = executor_types.Address;
 const Hash = executor_types.Hash;
@@ -182,6 +195,30 @@ pub fn runFixture(
         try block_hashes_list.append(alloc, .{ .number = genesis_number, .hash = genesis_hash });
         var last_valid_hash = genesis_hash;
         var test_failed = false;
+        var prev_excess_blob_gas: ?u64 = blk: {
+            const v = genesis_bh.get("excessBlobGas") orelse break :blk null;
+            break :blk json_helpers.jsonU64(v) catch null;
+        };
+        var prev_blob_gas_used: ?u64 = blk: {
+            const v = genesis_bh.get("blobGasUsed") orelse break :blk null;
+            break :blk json_helpers.jsonU64(v) catch null;
+        };
+        var prev_gas_limit: ?u64 = blk: {
+            const v = genesis_bh.get("gasLimit") orelse break :blk null;
+            break :blk json_helpers.jsonU64(v) catch null;
+        };
+        var prev_gas_used: ?u64 = blk: {
+            const v = genesis_bh.get("gasUsed") orelse break :blk null;
+            break :blk json_helpers.jsonU64(v) catch null;
+        };
+        var prev_timestamp: ?u64 = blk: {
+            const v = genesis_bh.get("timestamp") orelse break :blk null;
+            break :blk json_helpers.jsonU64(v) catch null;
+        };
+        var prev_base_fee: ?u64 = blk: {
+            const v = genesis_bh.get("baseFeePerGas") orelse break :blk null;
+            break :blk json_helpers.jsonU64(v) catch null;
+        };
 
         for (blocks_arr.items) |block_val| {
             const block = switch (block_val) {
@@ -189,15 +226,15 @@ pub fn runFixture(
                 else => continue,
             };
 
-            // expectException: this block is expected to be invalid — freeze state, don't update last_valid_hash.
-            const expect_exception = blk: {
-                const ev = block.get("expectException") orelse break :blk false;
+            // expectException: this block is expected to be invalid.
+            // We attempt execution and verify the actual exception type matches what is expected.
+            const expect_exception_str: ?[]const u8 = blk: {
+                const ev = block.get("expectException") orelse break :blk null;
                 break :blk switch (ev) {
-                    .string => |s| s.len > 0,
-                    else => false,
+                    .string => |s| if (s.len > 0) s else null,
+                    else => null,
                 };
             };
-            if (expect_exception) continue;
 
             // blockHeader must be present for a valid block.
             const bh = switch (block.get("blockHeader") orelse continue) {
@@ -219,6 +256,12 @@ pub fn runFixture(
             // Build execution environment from blockHeader + accumulated block hashes.
             var env = buildEnv(alloc, bh, block, block_hashes_list.items) catch continue;
             env.blob_base_fee_update_fraction = blobFractionForBlock(blob_schedule, network, env.timestamp);
+            env.parent_excess_blob_gas = prev_excess_blob_gas;
+            env.parent_blob_gas_used = prev_blob_gas_used;
+            env.parent_gas_limit = prev_gas_limit;
+            env.parent_gas_used = prev_gas_used;
+            env.parent_timestamp = prev_timestamp;
+            env.parent_base_fee = prev_base_fee;
 
             // Decode transactions.
             const txs = executor_tx_decode.decodeTxs(alloc, raw_txs) catch |err| {
@@ -236,7 +279,7 @@ pub fn runFixture(
             // For transition forks, select the spec appropriate for this block's timestamp.
             const block_spec = hardfork.specForBlock(network, env.timestamp) orelse spec;
             const reward = hardfork.blockReward(block_spec);
-            const result = executor_transition.transition(
+            const result = executor.executeBlockFromAlloc(
                 alloc,
                 chain_alloc,
                 env,
@@ -244,24 +287,68 @@ pub fn runFixture(
                 block_spec,
                 fixture_chain_id,
                 reward,
-            ) catch continue;
+            ) catch |exec_err| {
+                if (expect_exception_str) |expected| {
+                    const classified = executor_exceptions.mapBlockError(exec_err)
+                        orelse executor_exceptions.mapTransactionError(exec_err);
+                    if (!matchesException(expected, classified)) {
+                        if (!std.mem.startsWith(u8, expected, executor_exceptions.block_exception_prefix)) {
+                            test_failed = true;
+                            if (!quiet) {
+                                std.debug.print("FAIL {s} wrong exception: expected '{s}', got '{s}' (block {})\n", .{ test_name, expected, classified, env.number });
+                            }
+                        }
+                    }
+                } else {
+                    // No exception was expected but execution failed — log and fail.
+                    test_failed = true;
+                    if (!quiet) {
+                        const classified = executor_exceptions.mapBlockError(exec_err)
+                            orelse executor_exceptions.mapTransactionError(exec_err);
+                        std.debug.print("FAIL {s} unexpected exception '{s}' (block {})\n", .{ test_name, classified, env.number });
+                    }
+                }
+                continue;
+            };
 
-            // Compute post-state root.
-            const post_state_root = executor_output.computeStateRoot(alloc, result.alloc, &.{}) catch [_]u8{0} ** 32;
+            const post_state_root = result.post_state_root;
 
             // Pre-Byzantium: per-tx state roots are now computed inside transition().
             // Each receipt already has .state_root set correctly.
 
-            const receipts_root = executor_output.computeReceiptsRoot(alloc, result.receipts) catch [_]u8{0} ** 32;
+            const receipts_root = result.receipts_root;
 
             const state_ok = std.mem.eql(u8, &post_state_root, &expected_block_state_root);
             const receipts_ok = std.mem.eql(u8, &receipts_root, &expected_block_receipts_root);
 
-            if (state_ok and receipts_ok) {
+            if (expect_exception_str) |expected| {
+                // No txs were rejected. For BlockException, the roots should not match.
+                if (std.mem.startsWith(u8, expected, executor_exceptions.block_exception_prefix)) {
+                    if (state_ok and receipts_ok) {
+                        test_failed = true;
+                        if (!quiet) {
+                            std.debug.print("FAIL {s} expected block exception '{s}' but block was valid\n", .{ test_name, expected });
+                        }
+                    }
+                } else {
+                    // TransactionException expected but no tx was rejected.
+                    test_failed = true;
+                    if (!quiet) {
+                        std.debug.print("FAIL {s} expected exception '{s}' but no tx was rejected (block {})\n", .{ test_name, expected, env.number });
+                    }
+                }
+                // Do not advance chain for expected-exception blocks.
+            } else if (state_ok and receipts_ok) {
                 // Commit: thread state to next block.
-                chain_alloc = result.alloc;
+                chain_alloc = result.post_alloc;
                 last_valid_hash = expected_block_hash;
                 try block_hashes_list.append(alloc, .{ .number = env.number, .hash = expected_block_hash });
+                prev_excess_blob_gas = if (bh.get("excessBlobGas")) |v| json_helpers.jsonU64(v) catch null else null;
+                prev_blob_gas_used = if (bh.get("blobGasUsed")) |v| json_helpers.jsonU64(v) catch null else null;
+                prev_gas_limit = if (bh.get("gasLimit")) |v| json_helpers.jsonU64(v) catch null else null;
+                prev_gas_used = if (bh.get("gasUsed")) |v| json_helpers.jsonU64(v) catch null else null;
+                prev_timestamp = if (bh.get("timestamp")) |v| json_helpers.jsonU64(v) catch null else null;
+                prev_base_fee = if (bh.get("baseFeePerGas")) |v| json_helpers.jsonU64(v) catch null else null;
             } else {
                 test_failed = true;
 
@@ -285,7 +372,7 @@ pub fn runFixture(
                         block,
                         test_obj.get("postState"),
                         result.receipts,
-                        result.alloc,
+                        result.post_alloc,
                     );
                     std.debug.print("{s}\n", .{out.items});
                 }
@@ -384,6 +471,8 @@ fn buildEnv(
     if (randao_val) |v| env.random = json_helpers.hexToHash(json_helpers.getString2(v) orelse "") catch null;
 
     if (bh.get("excessBlobGas")) |v| env.excess_blob_gas = json_helpers.jsonU64(v) catch null;
+    if (bh.get("gasUsed")) |v| env.gas_used_header = json_helpers.jsonU64(v) catch null;
+    if (bh.get("blobGasUsed")) |v| env.blob_gas_used_header = json_helpers.jsonU64(v) catch null;
     if (bh.get("parentBeaconBlockRoot")) |v| env.parent_beacon_block_root =
         json_helpers.hexToHash(json_helpers.getString2(v) orelse "") catch null;
     if (bh.get("parentHash")) |v| env.parent_hash =

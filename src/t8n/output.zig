@@ -115,16 +115,9 @@ pub fn writeResultJson(
     try bw.writeAll("  ]");
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
-    // rejected
+    // rejected — always empty: transition() now fails-fast on any invalid tx
     buf.clearRetainingCapacity();
-    try bw.writeAll("\"rejected\": [");
-    for (result.rejected, 0..) |rej, i| {
-        try bw.print("{{\"index\": {}, \"error\": ", .{rej.index});
-        try writeJsonString(bw, rej.err);
-        try bw.writeAll("}");
-        if (i < result.rejected.len - 1) try bw.writeAll(", ");
-    }
-    try bw.writeAll("]");
+    try bw.writeAll("\"rejected\": []");
     try fields.append(alloc, try alloc.dupe(u8, buf.items));
 
     // currentDifficulty
