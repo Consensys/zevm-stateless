@@ -83,6 +83,199 @@ fn finalizeOutput(
     };
 }
 
+fn u256ToHashLocal(value: u256) types.Hash {
+    var out: types.Hash = @splat(0);
+    var n = value;
+    var i: usize = 32;
+    while (i > 0) {
+        i -= 1;
+        out[i] = @intCast(n & 0xff);
+        n >>= 8;
+    }
+    return out;
+}
+
+/// EIP system caller — accessed during system contract calls but excluded from the BAL.
+const SYSTEM_ADDRESS: types.Address = .{
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xfe,
+};
+
+/// Build a sorted slice of AccessedEntry from the WitnessDatabase access log
+/// and the post-execution alloc delta.  The result is sorted ascending by address.
+fn buildAccessedEntries(
+    alloc: std.mem.Allocator,
+    access_log: db_mod.AccessLog,
+    post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
+    deleted_accounts: []const types.Address,
+) ![]types.AccessedEntry {
+    var entries = std.ArrayListUnmanaged(types.AccessedEntry){};
+
+    var addr_iter = access_log.accounts.iterator();
+    while (addr_iter.next()) |acc_kv| {
+        const address = acc_kv.key_ptr.*;
+        // The EIP system caller address is a virtual address used to invoke system
+        // contracts.  It is excluded from the BAL UNLESS ETH was actually sent to it
+        // by a user transaction (in which case it has a real balance change and IS
+        // included — e.g., test_selfdestruct_to_system_address).
+        if (std.mem.eql(u8, &address, &SYSTEM_ADDRESS)) {
+            if (post_alloc.get(address)) |p| {
+                // Include only if balance genuinely changed (ETH was sent to SYSTEM_ADDRESS).
+                if (p.balance == 0) continue;
+                // Otherwise fall through: SYSTEM_ADDRESS has a real balance and belongs in BAL.
+            } else continue;
+        }
+        const pre = acc_kv.value_ptr.*;
+
+        const post_acct = post_alloc.get(address);
+
+        // Selfdestructed accounts are removed from post_alloc by extractPostState.
+        // For EIP-7928 BAL purposes their post-state is effectively empty (balance=0,
+        // nonce unchanged, code cleared, storage cleared).  Fall back to 0/empty
+        // rather than pre-state values so we correctly detect the balance change.
+        const is_deleted = for (deleted_accounts) |da| {
+            if (std.mem.eql(u8, &da, &address)) break true;
+        } else false;
+
+        const post_nonce = if (post_acct) |p| p.nonce else pre.nonce;
+        const post_balance: u256 = if (post_acct) |p| p.balance else if (is_deleted) 0 else pre.balance;
+        const post_code_hash: types.Hash = if (post_acct) |p| blk: {
+            if (p.code_hash) |ch| break :blk ch;
+            if (p.code.len > 0) break :blk mpt.keccak256(p.code);
+            break :blk primitives.KECCAK_EMPTY;
+        } else if (is_deleted) primitives.KECCAK_EMPTY else pre.code_hash;
+
+        var storage_changes = std.ArrayListUnmanaged(types.StorageChange){};
+        var storage_reads = std.ArrayListUnmanaged(types.Hash){};
+
+        const witness_storage = access_log.storage.get(address);
+        if (witness_storage) |inner| {
+            var slot_map = inner;
+            var slot_iter = slot_map.iterator();
+            while (slot_iter.next()) |slot_kv| {
+                const slot_key = slot_kv.key_ptr.*;
+                const pre_val = slot_kv.value_ptr.*;
+                const post_val = if (post_acct) |p| p.storage.get(slot_key) orelse pre_val else if (is_deleted) 0 else pre_val;
+                const slot_hash = u256ToHashLocal(slot_key);
+                // EIP-7928: a slot is a storageChange if its final value differs from the
+                // pre-block value, OR if it was committed to a different value at any tx
+                // boundary (cross-tx net-zero write: 0→X committed in tx1, X→0 in tx2).
+                // Within-tx net-zero writes (0→X→0 all in one tx) are storageReads since
+                // the tx-level committed value never left the pre-block value.
+                const was_cross_tx_changed = if (access_log.committed_changed.get(address)) |slots|
+                    slots.contains(slot_key)
+                else
+                    false;
+                if (post_val != pre_val or was_cross_tx_changed) {
+                    try storage_changes.append(alloc, .{ .slot = slot_hash, .post_value = post_val });
+                } else {
+                    try storage_reads.append(alloc, slot_hash);
+                }
+            }
+        }
+
+        // Also capture storage changes that weren't routed through WitnessDatabase.
+        // This happens for newly-created contracts: zevm's sload() returns 0 for
+        // `is_newly_created` accounts without calling db.storage(), so those slots
+        // are absent from witness_storage.  For these slots pre_val is always 0.
+        if (post_acct) |p| {
+            var post_iter = p.storage.iterator();
+            while (post_iter.next()) |post_kv| {
+                const slot_key = post_kv.key_ptr.*;
+                const post_val = post_kv.value_ptr.*;
+                // Skip zero-value slots: pre_val is always 0 for newly-created accounts,
+                // so post_val == 0 means no net change (net-zero write or just zero).
+                if (post_val == 0) continue;
+                const already_tracked = if (witness_storage) |ws| ws.get(slot_key) != null else false;
+                if (already_tracked) continue;
+                const slot_hash = u256ToHashLocal(slot_key);
+                try storage_changes.append(alloc, .{ .slot = slot_hash, .post_value = post_val });
+            }
+        }
+
+        std.mem.sort(types.StorageChange, storage_changes.items, {}, struct {
+            pub fn lessThan(_: void, a: types.StorageChange, b: types.StorageChange) bool {
+                return std.mem.lessThan(u8, &a.slot, &b.slot);
+            }
+        }.lessThan);
+        std.mem.sort(types.Hash, storage_reads.items, {}, struct {
+            pub fn lessThan(_: void, a: types.Hash, b: types.Hash) bool {
+                return std.mem.lessThan(u8, &a, &b);
+            }
+        }.lessThan);
+
+        try entries.append(alloc, .{
+            .address = address,
+            .pre_nonce = pre.nonce,
+            .pre_balance = pre.balance,
+            .pre_code_hash = pre.code_hash,
+            .post_nonce = post_nonce,
+            .post_balance = post_balance,
+            .post_code_hash = post_code_hash,
+            .storage_changes = try storage_changes.toOwnedSlice(alloc),
+            .storage_reads = try storage_reads.toOwnedSlice(alloc),
+        });
+    }
+
+    // Also include accounts that appear in post_alloc but were NOT tracked via
+    // WitnessDatabase.basic() (e.g., SELFDESTRUCT beneficiary that returned InvalidProof
+    // because its non-existence proof was absent from the witness — still a real access).
+    var post_iter2 = post_alloc.iterator();
+    while (post_iter2.next()) |kv| {
+        const address = kv.key_ptr.*;
+        if (access_log.accounts.contains(address)) continue; // already handled above
+        // Skip addresses that aren't real state changes (coinbase zero-balance etc.)
+        const p = kv.value_ptr.*;
+        // Empty pre-state for accounts not in the access log.
+        const pre_empty = db_mod.AccountPreState{};
+        const is_deleted = for (deleted_accounts) |da| {
+            if (std.mem.eql(u8, &da, &address)) break true;
+        } else false;
+        const post_balance: u256 = if (is_deleted) 0 else p.balance;
+        const post_code_hash: types.Hash = if (p.code_hash) |ch| ch else if (p.code.len > 0) mpt.keccak256(p.code) else primitives.KECCAK_EMPTY;
+        // Skip if no actual change from empty pre-state.
+        if (post_balance == 0 and p.nonce == 0 and
+            std.mem.eql(u8, &post_code_hash, &primitives.KECCAK_EMPTY) and
+            p.storage.count() == 0 and !is_deleted) continue;
+
+        var storage_changes2 = std.ArrayListUnmanaged(types.StorageChange){};
+        var post_storage_iter = p.storage.iterator();
+        while (post_storage_iter.next()) |slot_kv| {
+            const slot_key = slot_kv.key_ptr.*;
+            const post_val = slot_kv.value_ptr.*;
+            if (post_val == 0) continue;
+            try storage_changes2.append(alloc, .{ .slot = u256ToHashLocal(slot_key), .post_value = post_val });
+        }
+        std.mem.sort(types.StorageChange, storage_changes2.items, {}, struct {
+            pub fn lessThan(_: void, a: types.StorageChange, b: types.StorageChange) bool {
+                return std.mem.lessThan(u8, &a.slot, &b.slot);
+            }
+        }.lessThan);
+
+        try entries.append(alloc, .{
+            .address = address,
+            .pre_nonce = pre_empty.nonce,
+            .pre_balance = pre_empty.balance,
+            .pre_code_hash = pre_empty.code_hash,
+            .post_nonce = p.nonce,
+            .post_balance = post_balance,
+            .post_code_hash = post_code_hash,
+            .storage_changes = try storage_changes2.toOwnedSlice(alloc),
+            .storage_reads = &.{},
+        });
+    }
+
+
+    std.mem.sort(types.AccessedEntry, entries.items, {}, struct {
+        pub fn lessThan(_: void, a: types.AccessedEntry, b: types.AccessedEntry) bool {
+            return std.mem.lessThan(u8, &a.address, &b.address);
+        }
+    }.lessThan);
+
+    return entries.toOwnedSlice(alloc);
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 pub const ExecuteBlockResult = struct {
@@ -165,14 +358,7 @@ pub fn executeBlockStateless(
 
     // Wire WitnessDatabase as fallback on an empty InMemoryDB.
     // All account/storage reads during EVM execution are served via live MPT proof verification.
-    {
-        const mpt_local = @import("mpt");
-        for (witness_codes, 0..) |code, ci| {
-            const h = mpt_local.keccak256(code);
-            std.debug.print("DBG witness_code[{}] hash=0x{s} len={}\n", .{ ci, std.fmt.bytesToHex(h, .lower), code.len });
-        }
-    }
-    var witness_db = db_mod.WitnessDatabase.init(node_index, pre_state_root, witness_codes, block_hashes);
+    var witness_db = db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes);
     var db = database_mod.InMemoryDB.init(alloc);
     db.fallback = witness_db.buildFallback();
 
@@ -188,6 +374,9 @@ pub fn executeBlockStateless(
         fork_mod.blockReward(spec),
         public_keys,
     );
+    const access_log = witness_db.takeAccessLog();
+    const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts);
+    try block_validation.validateBlockAccessList(alloc, ep.block_access_list, accessed, spec);
     try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);
 }
@@ -205,10 +394,6 @@ pub fn executeStatelessInput(
 
     const pre_state_root_raw = rlp_decode.findPreStateRoot(si.witness.headers, ep.block_number);
     const pre_state_root = pre_state_root_raw orelse ep.state_root;
-    {
-        const pr = std.fmt.bytesToHex(pre_state_root, .lower);
-        std.debug.print("DBG block={d} pre_state_root=0x{s} found={}\n", .{ ep.block_number, &pr, pre_state_root_raw != null });
-    }
 
     var node_index = try mpt.buildNodeIndex(alloc, si.witness.nodes);
     defer node_index.deinit();

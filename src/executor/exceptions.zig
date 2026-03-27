@@ -120,6 +120,7 @@ pub fn mapBlockError(err: anyerror) ?[]const u8 {
         error.InvalidGasUsed => E.INVALID_GAS_USED.name(),
         error.InvalidGasUsedAboveLimit => E.INVALID_GAS_USED_ABOVE_LIMIT.name(),
         error.GasUsedOverflow => E.GAS_USED_OVERFLOW.name(),
+        error.InvalidBlockAccessList => E.INVALID_BLOCK_ACCESS_LIST.name(),
         else => null,
     };
 }

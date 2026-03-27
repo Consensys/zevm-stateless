@@ -1,5 +1,6 @@
 const types = @import("executor_types");
 const primitives = @import("primitives");
+const bal = @import("executor_bal");
 
 // EIP-1559 / gas limit constants
 const MIN_GAS_LIMIT: u64 = 5_000;
@@ -210,3 +211,138 @@ fn fakeBlobGasPrice(excess_blob_gas: u64, update_fraction: u64) u128 {
 }
 
 const std = @import("std");
+
+/// Post-execution BAL validation (EIP-7928, Amsterdam+).
+/// `accessed` must be sorted ascending by address (as returned by buildAccessedEntries).
+pub fn validateBlockAccessList(
+    alloc: std.mem.Allocator,
+    declared_bytes: []const u8,
+    accessed: []const types.AccessedEntry,
+    spec: primitives.SpecId,
+) !void {
+    if (!primitives.isEnabledIn(spec, .amsterdam)) return;
+
+    if (declared_bytes.len == 0) {
+        if (accessed.len == 0) return;
+        return error.InvalidBlockAccessList;
+    }
+
+    {
+        var tmp: [16]u8 = @splat(0);
+        const n = @min(declared_bytes.len, 16);
+        @memcpy(tmp[0..n], declared_bytes[0..n]);
+        std.debug.print("DBG BAL declared_bytes len={} first16=0x{s}\n", .{ declared_bytes.len, std.fmt.bytesToHex(tmp, .lower) });
+    }
+    const declared = bal.decode(alloc, declared_bytes) catch |err| {
+        std.debug.print("DBG BAL decode failed: {}\n", .{err});
+        return error.InvalidBlockAccessList;
+    };
+
+    // Verify declared is strictly ascending by address (canonical BAL order)
+    for (1..@max(1, declared.len)) |i| {
+        if (std.mem.order(u8, &declared[i - 1].address, &declared[i].address) != .lt) {
+            return error.InvalidBlockAccessList;
+        }
+    }
+
+    if (declared.len != accessed.len) {
+        std.debug.print("DBG BAL count mismatch: declared={} computed={}\n", .{ declared.len, accessed.len });
+        for (declared) |d| std.debug.print("  declared: 0x{s}\n", .{std.fmt.bytesToHex(d.address, .lower)});
+        for (accessed) |a| std.debug.print("  computed: 0x{s}\n", .{std.fmt.bytesToHex(a.address, .lower)});
+        return error.InvalidBlockAccessList;
+    }
+
+    for (declared, accessed) |decl, comp| {
+        if (!std.mem.eql(u8, &decl.address, &comp.address)) {
+            std.debug.print("DBG BAL addr mismatch: declared=0x{s} computed=0x{s}\n", .{ std.fmt.bytesToHex(decl.address, .lower), std.fmt.bytesToHex(comp.address, .lower) });
+            return error.InvalidBlockAccessList;
+        }
+
+        // Nonce: non-empty iff changed; last entry == post_nonce
+        if (comp.pre_nonce != comp.post_nonce) {
+            if (decl.nonce_changes.len == 0) {
+                std.debug.print("DBG BAL 0x{s}: nonce changed ({}->{}) but decl nonce_changes empty\n", .{ std.fmt.bytesToHex(comp.address, .lower), comp.pre_nonce, comp.post_nonce });
+                return error.InvalidBlockAccessList;
+            }
+            if (decl.nonce_changes[decl.nonce_changes.len - 1] != comp.post_nonce) {
+                std.debug.print("DBG BAL 0x{s}: nonce last={} expected={}\n", .{ std.fmt.bytesToHex(comp.address, .lower), decl.nonce_changes[decl.nonce_changes.len - 1], comp.post_nonce });
+                return error.InvalidBlockAccessList;
+            }
+        } else {
+            if (decl.nonce_changes.len != 0) {
+                std.debug.print("DBG BAL 0x{s}: nonce unchanged ({}) but decl nonce_changes len={}\n", .{ std.fmt.bytesToHex(comp.address, .lower), comp.pre_nonce, decl.nonce_changes.len });
+                return error.InvalidBlockAccessList;
+            }
+        }
+
+        // Balance: last entry must equal post_balance; empty iff no net change AND no intermediate changes.
+        // Note: EIP-7928 records ALL per-tx balance changes, including those that net to zero
+        // (e.g., funded in tx0 and fully spent in tx1).  We can't detect intermediate-only changes
+        // without per-tx tracking, so we accept decl.balance_changes.len != 0 even when pre==post,
+        // as long as the last entry equals the final balance.
+        if (decl.balance_changes.len != 0) {
+            if (decl.balance_changes[decl.balance_changes.len - 1] != comp.post_balance) {
+                std.debug.print("DBG BAL 0x{s}: balance last={} expected={}\n", .{ std.fmt.bytesToHex(comp.address, .lower), decl.balance_changes[decl.balance_changes.len - 1], comp.post_balance });
+                return error.InvalidBlockAccessList;
+            }
+        } else if (comp.pre_balance != comp.post_balance) {
+            std.debug.print("DBG BAL 0x{s}: balance changed ({}->{}) but decl balance_changes empty\n", .{ std.fmt.bytesToHex(comp.address, .lower), comp.pre_balance, comp.post_balance });
+            return error.InvalidBlockAccessList;
+        }
+
+        // Code: last code_change (if any) must match post_code_hash.
+        // EIP-7928 records ALL per-tx code changes, including intermediate ones that net
+        // to zero (e.g., delegation set in tx0 then cleared in tx1 = 2 code_changes with
+        // pre_code_hash == post_code_hash).  Mirror the balance_changes logic: accept
+        // non-empty code_changes as long as the last entry hashes to post_code_hash.
+        if (decl.code_changes.len != 0) {
+            const last_code = decl.code_changes[decl.code_changes.len - 1];
+            var last_code_hash: primitives.Hash = primitives.KECCAK_EMPTY;
+            if (last_code.len > 0) {
+                var h = std.crypto.hash.sha3.Keccak256.init(.{});
+                h.update(last_code);
+                h.final(&last_code_hash);
+            }
+            if (!std.mem.eql(u8, &last_code_hash, &comp.post_code_hash)) {
+                std.debug.print("DBG BAL 0x{s}: code_change last hash mismatch\n", .{std.fmt.bytesToHex(comp.address, .lower)});
+                return error.InvalidBlockAccessList;
+            }
+        } else {
+            // No code changes: code must be unchanged net.
+            if (!std.mem.eql(u8, &comp.pre_code_hash, &comp.post_code_hash)) {
+                std.debug.print("DBG BAL 0x{s}: code changed but decl code_changes empty\n", .{std.fmt.bytesToHex(comp.address, .lower)});
+                return error.InvalidBlockAccessList;
+            }
+        }
+
+        // Storage changes: exact sorted match on {slot, post_value}
+        if (decl.storage_changes.len != comp.storage_changes.len) {
+            std.debug.print("DBG BAL 0x{s}: storage_changes count decl={} computed={}\n", .{ std.fmt.bytesToHex(comp.address, .lower), decl.storage_changes.len, comp.storage_changes.len });
+            for (decl.storage_changes) |ds| std.debug.print("  decl  slot=0x{s} val={}\n", .{ std.fmt.bytesToHex(ds.slot, .lower), ds.post_value });
+            for (comp.storage_changes) |cs| std.debug.print("  comp  slot=0x{s} val={}\n", .{ std.fmt.bytesToHex(cs.slot, .lower), cs.post_value });
+            return error.InvalidBlockAccessList;
+        }
+        for (decl.storage_changes, comp.storage_changes) |ds, cs| {
+            if (!std.mem.eql(u8, &ds.slot, &cs.slot)) {
+                std.debug.print("DBG BAL 0x{s}: storage_change slot mismatch decl=0x{s} comp=0x{s}\n", .{ std.fmt.bytesToHex(comp.address, .lower), std.fmt.bytesToHex(ds.slot, .lower), std.fmt.bytesToHex(cs.slot, .lower) });
+                return error.InvalidBlockAccessList;
+            }
+            if (ds.post_value != cs.post_value) {
+                std.debug.print("DBG BAL 0x{s}: storage_change value mismatch slot=0x{s} decl={} comp={}\n", .{ std.fmt.bytesToHex(comp.address, .lower), std.fmt.bytesToHex(ds.slot, .lower), ds.post_value, cs.post_value });
+                return error.InvalidBlockAccessList;
+            }
+        }
+
+        // Storage reads: exact sorted match
+        if (decl.storage_reads.len != comp.storage_reads.len) {
+            std.debug.print("DBG BAL 0x{s}: storage_reads count decl={} computed={}\n", .{ std.fmt.bytesToHex(comp.address, .lower), decl.storage_reads.len, comp.storage_reads.len });
+            return error.InvalidBlockAccessList;
+        }
+        for (decl.storage_reads, comp.storage_reads) |dr, cr| {
+            if (!std.mem.eql(u8, &dr, &cr)) {
+                std.debug.print("DBG BAL 0x{s}: storage_read mismatch decl=0x{s} comp=0x{s}\n", .{ std.fmt.bytesToHex(comp.address, .lower), std.fmt.bytesToHex(dr, .lower), std.fmt.bytesToHex(cr, .lower) });
+                return error.InvalidBlockAccessList;
+            }
+        }
+    }
+}

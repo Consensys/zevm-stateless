@@ -27,6 +27,11 @@ pub const AllocAccount = struct {
     /// (e.g. a touched contract whose code is not included in the stateless witness).
     /// When null, the hash is computed from `code` (backwards-compatible).
     code_hash: ?[32]u8 = null,
+    /// Set of storage keys that were explicitly written (SSTORE'd) during block execution,
+    /// even if the final value equals the pre-block value.
+    /// Used by buildAccessedEntries() to correctly classify no-op SSTORE operations
+    /// as storage_changes (per EIP-7928 semantics) rather than storage_reads.
+    written_storage: std.AutoHashMapUnmanaged(U256, void) = .{},
 };
 
 pub const AccessListEntry = struct {
@@ -136,6 +141,29 @@ pub const AuthorizationItem = struct {
     y_parity: u256 = 0,
     r: u256 = 0,
     s: u256 = 0,
+};
+
+// ─── Block access list types ──────────────────────────────────────────────────
+
+/// One storage slot change recorded in the block access list.
+pub const StorageChange = struct { slot: Hash, post_value: u256 };
+
+/// All state accesses on a single address during block execution.
+/// Produced by WitnessDatabase tracking; consumed by validateBlockAccessList.
+pub const AccessedEntry = struct {
+    address: Address,
+    /// Account state BEFORE execution (from WitnessDatabase pre-state).
+    pre_nonce: u64,
+    pre_balance: u256,
+    pre_code_hash: Hash,
+    /// Account state AFTER execution (from post-state alloc).
+    post_nonce: u64,
+    post_balance: u256,
+    post_code_hash: Hash,
+    /// Storage slots whose value changed (pre_val != post_val).
+    storage_changes: []StorageChange,
+    /// Storage slots that were read but whose value did not change.
+    storage_reads: []Hash,
 };
 
 pub const TxInput = struct {

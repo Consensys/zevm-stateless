@@ -334,6 +334,15 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // executor_bal — EIP-7928 block access list RLP decoder
+    const executor_bal_mod = b.createModule(.{
+        .root_source_file = b.path("src/executor/bal.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    executor_bal_mod.addImport("primitives", primitives);
+    executor_bal_mod.addImport("mpt", mpt_mod);
+
     // executor_block_validation — block header validation (excess_blob_gas, etc.)
     const executor_block_validation_mod = b.createModule(.{
         .root_source_file = b.path("src/executor/block_validation.zig"),
@@ -342,6 +351,7 @@ pub fn build(b: *std.Build) void {
     });
     executor_block_validation_mod.addImport("executor_types", executor_types_mod);
     executor_block_validation_mod.addImport("primitives", primitives);
+    executor_block_validation_mod.addImport("executor_bal", executor_bal_mod);
 
     // native_executor_transition — transition logic using crypto-enabled local zevm
     const native_executor_transition_mod = b.createModule(.{
@@ -413,6 +423,7 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("executor_tx_decode", native_executor_tx_decode_mod);
     executor_mod.addImport("rlp_decode", rlp_decode_mod);
     executor_mod.addImport("executor_block_validation", executor_block_validation_mod);
+    executor_mod.addImport("executor_bal", executor_bal_mod);
 
     // t8n_input — t8n JSON parsing + re-exports executor types; used by spec-test-runner
     const t8n_input_mod = b.createModule(.{

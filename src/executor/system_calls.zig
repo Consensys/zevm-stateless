@@ -75,10 +75,12 @@ fn runSystemCall(
     // block would see it as warm (cheap) instead of cold (EIP-2929).
     const account_load = ctx.journaled_state.loadAccount(target) catch {
         ctx.journaled_state.discardTx();
+        ctx.journaled_state.database.discardTracking();
         return;
     };
     if (std.mem.eql(u8, &account_load.data.info.code_hash, &primitives.KECCAK_EMPTY)) {
         ctx.journaled_state.discardTx();
+        ctx.journaled_state.database.discardTracking();
         return;
     }
 
@@ -141,6 +143,9 @@ fn runSystemCall(
     if (ctx.journaled_state.inner.evm_state.getPtr(SYSTEM_ADDRESS)) |sa| {
         if (sa.info.nonce > 0) sa.info.nonce -= 1;
     }
+
+    // Notify the fallback database that this system call committed successfully.
+    ctx.journaled_state.database.commitTracking();
 }
 
 // ─── Pre-block system calls ───────────────────────────────────────────────────

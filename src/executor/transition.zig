@@ -406,6 +406,7 @@ pub fn transitionWithDb(
         // EIP-7702: type 4 with empty authorization list is invalid.
         if (tx.type == 4 and tx.authorization_list.len == 0) {
             ctx.journaled_state.discardTx();
+            ctx.journaled_state.database.discardTracking();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
@@ -422,6 +423,7 @@ pub fn transitionWithDb(
         {
             const sender_load = ctx.journaled_state.loadAccount(sender) catch |err| {
                 ctx.journaled_state.discardTx();
+                ctx.journaled_state.database.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -435,6 +437,7 @@ pub fn transitionWithDb(
             const tx_nonce = tx.nonce orelse 0;
             if (sender_info.nonce != tx_nonce) {
                 ctx.journaled_state.discardTx();
+                ctx.journaled_state.database.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -452,9 +455,9 @@ pub fn transitionWithDb(
                 break :blk n * 131_072 * max_blob_fee;
             } else 0;
             const max_cost = max_gas_fee + tx.value + blob_cost;
-            std.debug.print("DBG balance_check type={} blob_cost={} max_gas_fee={} tx_val={} max_cost={} balance={} n={} mfpbg={}\n", .{ tx.type, blob_cost, max_gas_fee, tx.value, max_cost, sender_info.balance, tx.blob_versioned_hashes.len, tx.max_fee_per_blob_gas orelse 0 });
             if (sender_info.balance < max_cost) {
                 ctx.journaled_state.discardTx();
+                ctx.journaled_state.database.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -472,6 +475,7 @@ pub fn transitionWithDb(
 
         var exec_result = handler_mod.ExecuteEvm.execute(&evm) catch |err| {
             ctx.journaled_state.discardTx();
+            ctx.journaled_state.database.discardTracking();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
@@ -578,6 +582,7 @@ pub fn transitionWithDb(
             reward_wei,
         ) catch {};
         ctx.journaled_state.commitTx();
+        ctx.journaled_state.database.commitTracking();
     }
 
     // ── Apply withdrawals (Shanghai+) ─────────────────────────────────────────
@@ -591,6 +596,7 @@ pub fn transitionWithDb(
     }
     if (env.withdrawals.len > 0) {
         ctx.journaled_state.commitTx();
+        ctx.journaled_state.database.commitTracking();
     }
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
@@ -663,7 +669,6 @@ fn extractPostState(
 
         // Skip accounts that were loaded as non-existent and never touched
         if (account.status.loaded_as_not_existing and !account.status.touched) continue;
-        std.debug.print("DBG evm_state 0x{s} bal={d} nonce={d} touched={} created={} sd={} lne={}\n", .{ std.fmt.bytesToHex(addr, .lower), account.info.balance, account.info.nonce, account.status.touched, account.status.created, account.status.self_destructed, account.status.loaded_as_not_existing });
 
         // Remove self-destructed accounts
         if (account.status.self_destructed) {
@@ -732,6 +737,10 @@ fn extractPostState(
         while (stor_it.next()) |slot| {
             const key = slot.key_ptr.*;
             const present = slot.value_ptr.*.present_value;
+            // Track written slots (even no-op SSTORE with net-zero value change) for EIP-7928 BAL.
+            if (slot.value_ptr.*.was_written) {
+                acct.written_storage.put(arena, key, {}) catch {};
+            }
             if (present == 0) {
                 if (!fresh_storage) {
                     // Existing account: keep zero as a deletion marker for computeStateRootDelta.
