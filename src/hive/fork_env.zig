@@ -22,9 +22,11 @@ pub const ForkSchedule = struct {
     osaka_ts: u64 = VERY_HIGH,
     bpo1_ts: u64 = VERY_HIGH,
     bpo2_ts: u64 = VERY_HIGH,
+    amsterdam_ts: u64 = VERY_HIGH,
     chain_id: u64 = 1,
 
     pub fn specAt(self: ForkSchedule, block: u64, ts: u64) primitives.SpecId {
+        if (ts >= self.amsterdam_ts) return .amsterdam;
         if (ts >= self.bpo2_ts) return .bpo2;
         if (ts >= self.bpo1_ts) return .bpo1;
         if (ts >= self.osaka_ts) return .osaka;
@@ -65,6 +67,7 @@ pub fn loadFromEnv() ForkSchedule {
     s.osaka_ts = envU64("HIVE_OSAKA_TIMESTAMP") orelse VERY_HIGH;
     s.bpo1_ts = envU64("HIVE_BPO1_TIMESTAMP") orelse VERY_HIGH;
     s.bpo2_ts = envU64("HIVE_BPO2_TIMESTAMP") orelse VERY_HIGH;
+    s.amsterdam_ts = envU64("HIVE_AMSTERDAM_TIMESTAMP") orelse VERY_HIGH;
     s.chain_id = envU64("HIVE_CHAIN_ID") orelse 1;
     return s;
 }

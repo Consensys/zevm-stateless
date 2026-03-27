@@ -39,8 +39,9 @@ RUN git clone --depth=1 https://github.com/herumi/mcl.git /tmp/mcl && \
     cd /tmp/mcl && \
     mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS="-stdlib=libc++" && \
-    make -j$(nproc) mcl_st && \
-    cp lib/libmcl.a /usr/local/lib/libmcl.a && \
+    make -j$(nproc) mcl && \
+    cp lib/libmcl.so* /usr/local/lib/ && \
+    ldconfig && \
     cp -r ../include/mcl /usr/local/include/ && \
     rm -rf /tmp/mcl
 
@@ -50,3 +51,6 @@ COPY . .
 COPY --from=zevm . /zevm
 
 RUN zig build install -Doptimize=ReleaseFast --prefix /out
+
+EXPOSE 8545
+ENTRYPOINT ["/out/bin/hive-rlp"]

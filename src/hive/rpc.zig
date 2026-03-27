@@ -2,7 +2,7 @@
 ///
 /// Listens on :8545. Handles only:
 ///   eth_blockNumber          → hex block number (liveness probe)
-///   eth_getBlockByNumber     → { "hash": "0x...", "number": "0x..." }
+///   eth_getBlockByNumber     → { "hash", "number", "coinbase", "stateRoot", "gasLimit", "timestamp", "extraData" }
 const std = @import("std");
 const Chain = @import("chain.zig").Chain;
 
@@ -110,15 +110,47 @@ fn processRpc(chain: *Chain, alloc: std.mem.Allocator, body: []const u8) []const
         };
 
         const stored = resolveBlock(chain, tag) orelse return nullResponse(alloc, id_str);
-        const result = std.fmt.allocPrint(
-            alloc,
-            "{{\"hash\":\"0x{x}\",\"number\":\"0x{x}\"}}",
-            .{ stored.hash, stored.number },
-        ) catch return "{}";
+        const result = buildBlockObject(alloc, stored) catch return "{}";
         return buildResponse(alloc, id_str, result);
     }
 
     return errorResponse("-32601", "Method not found");
+}
+
+fn buildBlockObject(alloc: std.mem.Allocator, s: @import("chain.zig").StoredHeader) ![]const u8 {
+    var buf = std.ArrayListUnmanaged(u8){};
+    const w = buf.writer(alloc);
+    try w.writeAll("{");
+    try w.print("\"hash\":\"0x{x}\"", .{s.hash});
+    try w.print(",\"number\":\"0x{x}\"", .{s.number});
+    try w.print(",\"coinbase\":\"0x{x}\"", .{s.coinbase});
+    try w.print(",\"stateRoot\":\"0x{x}\"", .{s.state_root});
+    try w.print(",\"gasLimit\":\"0x{x}\"", .{s.gas_limit});
+    try w.print(",\"timestamp\":\"0x{x}\"", .{s.timestamp});
+    const extra_hex = bytesToHex(alloc, s.extra_data);
+    try w.print(",\"extraData\":\"{s}\"", .{extra_hex});
+    if (s.base_fee) |v| try w.print(",\"baseFeePerGas\":\"0x{x}\"", .{v});
+    if (s.withdrawals_root) |v| try w.print(",\"withdrawalsRoot\":\"0x{x}\"", .{v});
+    if (s.blob_gas_used) |v| try w.print(",\"blobGasUsed\":\"0x{x}\"", .{v});
+    if (s.excess_blob_gas) |v| try w.print(",\"excessBlobGas\":\"0x{x}\"", .{v});
+    if (s.parent_beacon_block_root) |v| try w.print(",\"parentBeaconBlockRoot\":\"0x{x}\"", .{v});
+    if (s.requests_hash) |v| try w.print(",\"requestsHash\":\"0x{x}\"", .{v});
+    if (s.block_access_list_hash) |v| try w.print(",\"blockAccessListHash\":\"0x{x}\"", .{v});
+    if (s.slot_number) |v| try w.print(",\"slotNumber\":\"0x{x}\"", .{v});
+    try w.writeAll("}");
+    return buf.toOwnedSlice(alloc);
+}
+
+fn bytesToHex(alloc: std.mem.Allocator, bytes: []const u8) []const u8 {
+    const hex_chars = "0123456789abcdef";
+    const out = alloc.alloc(u8, 2 + bytes.len * 2) catch return "0x";
+    out[0] = '0';
+    out[1] = 'x';
+    for (bytes, 0..) |b, i| {
+        out[2 + i * 2] = hex_chars[b >> 4];
+        out[2 + i * 2 + 1] = hex_chars[b & 0xf];
+    }
+    return out;
 }
 
 fn resolveBlock(chain: *Chain, tag: []const u8) ?@import("chain.zig").StoredHeader {

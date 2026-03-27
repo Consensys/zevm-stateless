@@ -36,8 +36,9 @@ RUN git clone --depth=1 https://github.com/herumi/mcl.git /tmp/mcl && \
     cd /tmp/mcl && \
     mkdir build && cd build && \
     cmake .. -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_COMPILER=clang++ -DCMAKE_CXX_FLAGS="-stdlib=libc++" && \
-    make -j$(nproc) mcl_st && \
-    cp lib/libmcl.a /usr/local/lib/libmcl.a && \
+    make -j$(nproc) mcl && \
+    cp lib/libmcl.so* /usr/local/lib/ && \
+    ldconfig && \
     cp -r ../include/mcl /usr/local/include/ && \
     rm -rf /tmp/mcl
 
@@ -52,9 +53,11 @@ RUN zig build hive-rlp -Doptimize=ReleaseFast
 FROM debian:bookworm-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        libsecp256k1-dev libssl-dev \
+        libsecp256k1-dev libssl-dev libc++1 \
     && rm -rf /var/lib/apt/lists/*
 
+COPY --from=build /usr/local/lib/libmcl.so* /usr/local/lib/
+RUN ldconfig
 COPY --from=build /src/zig-out/bin/hive-rlp /hive-rlp
 
 EXPOSE 8545

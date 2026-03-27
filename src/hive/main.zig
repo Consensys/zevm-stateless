@@ -43,7 +43,23 @@ pub fn main() !void {
     };
 
     // ── Initialize chain ──────────────────────────────────────────────────────
-    var chain = chain_mod.Chain.init(backing, g.alloc, g.hash, fork);
+    var chain = chain_mod.Chain.init(backing, g.alloc, chain_mod.StoredHeader{
+        .number = 0,
+        .hash = g.hash,
+        .coinbase = g.coinbase,
+        .state_root = g.state_root,
+        .gas_limit = g.gas_limit,
+        .timestamp = g.timestamp,
+        .extra_data = g.extra_data,
+        .base_fee = g.base_fee,
+        .withdrawals_root = g.withdrawals_root,
+        .blob_gas_used = g.blob_gas_used,
+        .excess_blob_gas = g.excess_blob_gas,
+        .parent_beacon_block_root = g.parent_beacon_block_root,
+        .requests_hash = g.requests_hash,
+        .block_access_list_hash = g.block_access_list_hash,
+        .slot_number = g.slot_number,
+    }, fork);
     defer chain.deinit();
 
     std.debug.print("hive-rlp: genesis hash 0x{x}\n", .{g.hash});

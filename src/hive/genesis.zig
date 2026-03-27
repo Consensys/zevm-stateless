@@ -30,6 +30,17 @@ pub const GenesisResult = struct {
     hash: Hash,
     timestamp: u64,
     coinbase: Address,
+    state_root: Hash,
+    gas_limit: u64,
+    extra_data: []const u8,
+    base_fee: ?u256 = null,
+    withdrawals_root: ?Hash = null,
+    blob_gas_used: ?u64 = null,
+    excess_blob_gas: ?u64 = null,
+    parent_beacon_block_root: ?Hash = null,
+    requests_hash: ?Hash = null,
+    block_access_list_hash: ?Hash = null,
+    slot_number: ?u64 = null,
 };
 
 /// All fields needed to RLP-encode a block header and compute its hash.
@@ -57,6 +68,9 @@ pub const HeaderFields = struct {
     excess_blob_gas: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
     requests_hash: ?Hash = null,
+    // Amsterdam fields
+    block_access_list_hash: ?Hash = null,
+    slot_number: ?u64 = null,
 };
 
 /// Encode header fields as an RLP list and return keccak256 of the encoding.
@@ -89,6 +103,10 @@ pub fn computeBlockHash(arena: std.mem.Allocator, h: HeaderFields) !Hash {
         try fields.append(arena, try rlp.encodeBytes(arena, &pb));
     if (h.requests_hash) |rh|
         try fields.append(arena, try rlp.encodeBytes(arena, &rh));
+    if (h.block_access_list_hash) |bh|
+        try fields.append(arena, try rlp.encodeBytes(arena, &bh));
+    if (h.slot_number) |sn|
+        try fields.append(arena, try rlp.encodeU64(arena, sn));
     const encoded = try rlp.encodeList(arena, fields.items);
     return rlp.keccak256(encoded);
 }
@@ -165,6 +183,19 @@ pub fn parse(
         }) catch null;
     } else null;
 
+    // Amsterdam+: blockAccessListHash, slotNumber
+    const block_access_list_hash: ?Hash = if (primitives.isEnabledIn(spec, .amsterdam)) blk: {
+        const v = root.get("blockAccessListHash") orelse break :blk null;
+        break :blk hexToHash(switch (v) {
+            .string => |s| s,
+            else => break :blk null,
+        }) catch null;
+    } else null;
+    const slot_number: ?u64 = if (primitives.isEnabledIn(spec, .amsterdam))
+        jsonU64(root.get("slotNumber") orelse .{ .integer = 0 }) catch 0
+    else
+        null;
+
     // ── Parse alloc ───────────────────────────────────────────────────────────
     const alloc_map = try parseAlloc(
         arena,
@@ -197,6 +228,8 @@ pub fn parse(
         .excess_blob_gas = excess_blob_gas,
         .parent_beacon_block_root = parent_beacon_block_root,
         .requests_hash = requests_hash,
+        .block_access_list_hash = block_access_list_hash,
+        .slot_number = slot_number,
     });
 
     return GenesisResult{
@@ -204,6 +237,17 @@ pub fn parse(
         .hash = genesis_hash,
         .timestamp = timestamp,
         .coinbase = coinbase,
+        .state_root = state_root,
+        .gas_limit = gas_limit,
+        .extra_data = extra_data,
+        .base_fee = base_fee,
+        .withdrawals_root = withdrawals_root,
+        .blob_gas_used = blob_gas_used,
+        .excess_blob_gas = excess_blob_gas,
+        .parent_beacon_block_root = parent_beacon_block_root,
+        .requests_hash = requests_hash,
+        .block_access_list_hash = block_access_list_hash,
+        .slot_number = slot_number,
     };
 }
 

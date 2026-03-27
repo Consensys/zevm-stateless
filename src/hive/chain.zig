@@ -20,6 +20,19 @@ const AllocMap = std.AutoHashMapUnmanaged(Address, types.AllocAccount);
 pub const StoredHeader = struct {
     number: u64,
     hash: Hash,
+    coinbase: Address,
+    state_root: Hash,
+    gas_limit: u64,
+    timestamp: u64,
+    extra_data: []const u8,
+    base_fee: ?u256 = null,
+    withdrawals_root: ?Hash = null,
+    blob_gas_used: ?u64 = null,
+    excess_blob_gas: ?u64 = null,
+    parent_beacon_block_root: ?Hash = null,
+    requests_hash: ?Hash = null,
+    block_access_list_hash: ?Hash = null,
+    slot_number: ?u64 = null,
 };
 
 pub const Chain = struct {
@@ -31,7 +44,7 @@ pub const Chain = struct {
     pub fn init(
         backing: std.mem.Allocator,
         genesis_alloc: AllocMap,
-        genesis_hash: Hash,
+        genesis_header: StoredHeader,
         fork: ForkSchedule,
     ) Chain {
         var c = Chain{
@@ -42,7 +55,9 @@ pub const Chain = struct {
         };
         const alloc = c.arena.allocator();
         c.current_alloc = cloneAllocMap(alloc, genesis_alloc) catch .{};
-        c.headers.append(alloc, .{ .number = 0, .hash = genesis_hash }) catch {};
+        var gh = genesis_header;
+        gh.extra_data = alloc.dupe(u8, genesis_header.extra_data) catch &.{};
+        c.headers.append(alloc, gh) catch {};
         return c;
     }
 
@@ -136,7 +151,24 @@ pub const Chain = struct {
 
         // ── Commit ────────────────────────────────────────────────────────────
         self.current_alloc = result.alloc;
-        self.headers.append(alloc, .{ .number = hdr.number, .hash = block_hash }) catch {};
+        const extra_data_copy = alloc.dupe(u8, hdr.extra_data) catch &.{};
+        self.headers.append(alloc, .{
+            .number = hdr.number,
+            .hash = block_hash,
+            .coinbase = hdr.coinbase,
+            .state_root = hdr.state_root,
+            .gas_limit = hdr.gas_limit,
+            .timestamp = hdr.timestamp,
+            .extra_data = extra_data_copy,
+            .base_fee = hdr.base_fee,
+            .withdrawals_root = hdr.withdrawals_root,
+            .blob_gas_used = hdr.blob_gas_used,
+            .excess_blob_gas = hdr.excess_blob_gas,
+            .parent_beacon_block_root = hdr.parent_beacon_block_root,
+            .requests_hash = hdr.requests_hash,
+            .block_access_list_hash = hdr.block_access_list_hash,
+            .slot_number = hdr.slot_number,
+        }) catch {};
     }
 
     pub fn getByNumber(self: *const Chain, number: u64) ?StoredHeader {
@@ -166,10 +198,16 @@ const BlockHeader = struct {
     gas_limit: u64,
     gas_used: u64,
     timestamp: u64,
+    extra_data: []const u8 = &.{},
     mix_hash: Hash,
     base_fee: ?u256 = null,
+    withdrawals_root: ?Hash = null,
+    blob_gas_used: ?u64 = null,
     excess_blob_gas: ?u64 = null,
     parent_beacon_block_root: ?Hash = null,
+    requests_hash: ?Hash = null,
+    block_access_list_hash: ?Hash = null,
+    slot_number: ?u64 = null,
 };
 
 fn decodeHeader(payload: []const u8) !BlockHeader {
@@ -206,14 +244,17 @@ fn decodeHeader(payload: []const u8) !BlockHeader {
             9 => hdr.gas_limit = toU64(b),
             10 => hdr.gas_used = toU64(b),
             11 => hdr.timestamp = toU64(b),
-            // 12 = extraData (skip)
+            12 => hdr.extra_data = b,
             13 => hdr.mix_hash = toHash(b),
             // 14 = nonce (skip)
             15 => hdr.base_fee = toU256(b),
-            // 16 = withdrawalsRoot (skip)
-            // 17 = blobGasUsed (skip)
+            16 => hdr.withdrawals_root = toHash(b),
+            17 => hdr.blob_gas_used = toU64(b),
             18 => hdr.excess_blob_gas = toU64(b),
             19 => hdr.parent_beacon_block_root = toHash(b),
+            20 => hdr.requests_hash = toHash(b),
+            21 => hdr.block_access_list_hash = toHash(b),
+            22 => hdr.slot_number = toU64(b),
             else => {},
         }
         rest = rest[r.consumed..];
