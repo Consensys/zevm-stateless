@@ -227,7 +227,8 @@ pub fn validateBlockAccessList(
         return error.InvalidBlockAccessList;
     }
 
-    const declared = bal.decode(alloc, declared_bytes) catch {
+    const declared = bal.decode(alloc, declared_bytes) catch |err| {
+        std.debug.print("[BAL-DECODE-ERR] {}\n", .{err});
         return error.InvalidBlockAccessList;
     };
 

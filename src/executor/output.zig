@@ -58,6 +58,21 @@ pub fn computeTxRoot(
     return mpt_builder.trieRoot(alloc, items);
 }
 
+/// Compute the transactions trie root from raw transaction bytes.
+/// key[i] = RLP(i), value[i] = raw_txs[i] (already wire-encoded).
+pub fn computeRawTxRoot(
+    alloc: std.mem.Allocator,
+    raw_txs: []const []const u8,
+) ![32]u8 {
+    if (raw_txs.len == 0) return mpt_builder.EMPTY_TRIE_HASH;
+    const items = try alloc.alloc(mpt_builder.KV, raw_txs.len);
+    for (raw_txs, 0..) |raw_tx, i| {
+        items[i].key = try rlpIndex(alloc, i);
+        items[i].value = raw_tx;
+    }
+    return mpt_builder.trieRoot(alloc, items);
+}
+
 /// receiptsRoot: receipts trie, keys = RLP(index), values = typed receipt RLP.
 pub fn computeReceiptsRoot(
     alloc: std.mem.Allocator,

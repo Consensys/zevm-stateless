@@ -471,6 +471,45 @@ pub fn transitionWithDb(
             }
         }
 
+        // 3c. Pre-check intrinsic gas and initcode size — validateInitialTxGas() runs
+        // inside ExecuteEvm.execute() but errors are swallowed there (returned as Fail(0)).
+        // We replicate the checks here so violations reject the block instead of producing a receipt.
+        {
+            // EIP-3860 / EIP-7954: reject CREATE txs with oversized initcode.
+            if (tx.to == null and primitives.isEnabledIn(spec, .shanghai)) {
+                const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) 65536 else 49152;
+                if (tx.data.len > max_initcode) {
+                    ctx.journaled_state.discardTx();
+                    ctx.journaled_state.database.discardTracking();
+                    if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
+                    ctx.tx.data = null;
+                    ctx.tx.access_list.deinit();
+                    if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
+                    ctx.tx.blob_hashes = null;
+                    if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
+                    ctx.tx.authorization_list = null;
+                    return error.CreateInitcodeOverLimit;
+                }
+            }
+
+            // Intrinsic gas check: call validateInitialTxGas via a temporary EVM instance.
+            // ctx.tx is fully populated at this point (kind, data, access_list, etc.).
+            var frame_stack_pre = handler_mod.FrameStack.new();
+            var evm_pre = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &frame_stack_pre);
+            _ = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
+                ctx.journaled_state.discardTx();
+                ctx.journaled_state.database.discardTracking();
+                if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
+                ctx.tx.data = null;
+                ctx.tx.access_list.deinit();
+                if (ctx.tx.blob_hashes) |*bh| bh.deinit(alloc_mod.get());
+                ctx.tx.blob_hashes = null;
+                if (ctx.tx.authorization_list) |*al| al.deinit(alloc_mod.get());
+                ctx.tx.authorization_list = null;
+                return err;
+            };
+        }
+
         // 4. Execute
         var frame_stack = handler_mod.FrameStack.new();
         var evm = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &frame_stack);

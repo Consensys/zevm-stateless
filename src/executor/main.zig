@@ -29,6 +29,7 @@ const block_validation = @import("executor_block_validation");
 /// Re-export so callers can use these types without importing executor_types directly.
 pub const BlockHashEntry = types.BlockHashEntry;
 pub const AllocAccount = types.AllocAccount;
+pub const computeRawTxRoot = output_mod.computeRawTxRoot;
 
 // ─── Private helpers ──────────────────────────────────────────────────────────
 
