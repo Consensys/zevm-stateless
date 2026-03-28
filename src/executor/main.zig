@@ -318,7 +318,7 @@ pub fn executeBlock(
 ) !output.ProofOutput {
     const ep = &req.execution_payload;
     const spec = if (fork_name) |name|
-        fork_mod.specFromFork(name) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
+        fork_mod.specForBlock(name, ep.timestamp) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
     else
         fork_mod.mainnetSpec(ep.block_number, ep.timestamp);
 
@@ -345,7 +345,7 @@ pub fn executeBlockStateless(
     const ep = &req.execution_payload;
 
     const spec = if (fork_name) |name|
-        fork_mod.specFromFork(name) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
+        fork_mod.specForBlock(name, ep.timestamp) orelse fork_mod.mainnetSpec(ep.block_number, ep.timestamp)
     else if (ep.slot_number != null)
         // slot_number presence signals Amsterdam (or later) block.
         primitives.SpecId.amsterdam

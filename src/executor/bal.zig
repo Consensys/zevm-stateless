@@ -73,34 +73,19 @@ pub fn decode(alloc: std.mem.Allocator, data: []const u8) ![]BalEntry {
         ep = ep[addr_r.consumed..];
 
         // storageChanges: [ [slot_bytes, [[blockAccessIndex, postValue], ...]], ... ]
-        const storage_changes = decodeStorageChangeList(alloc, &ep) catch |err| {
-            std.debug.print("DBG BAL decodeStorageChangeList failed: {} ep_rem={}\n", .{ err, ep.len });
-            return error.InvalidBAL;
-        };
+        const storage_changes = decodeStorageChangeList(alloc, &ep) catch return error.InvalidBAL;
 
         // storageReads: [ slot_bytes, ... ]  (compact u256, variable len)
-        const storage_reads = decodeCompactSlotList(alloc, &ep) catch |err| {
-            std.debug.print("DBG BAL decodeCompactSlotList failed: {}\n", .{err});
-            return error.InvalidBAL;
-        };
+        const storage_reads = decodeCompactSlotList(alloc, &ep) catch return error.InvalidBAL;
 
         // balanceChanges: [ [blockAccessIndex, postBalance], ... ]
-        const balance_changes = decodePairListU256(alloc, &ep) catch |err| {
-            std.debug.print("DBG BAL decodePairListU256 failed: {}\n", .{err});
-            return error.InvalidBAL;
-        };
+        const balance_changes = decodePairListU256(alloc, &ep) catch return error.InvalidBAL;
 
         // nonceChanges: [ [blockAccessIndex, postNonce], ... ]
-        const nonce_changes = decodePairListU64(alloc, &ep) catch |err| {
-            std.debug.print("DBG BAL decodePairListU64 failed: {}\n", .{err});
-            return error.InvalidBAL;
-        };
+        const nonce_changes = decodePairListU64(alloc, &ep) catch return error.InvalidBAL;
 
         // codeChanges: [ [blockAccessIndex, postCode], ... ]
-        const code_changes = decodePairListBytes(alloc, &ep) catch |err| {
-            std.debug.print("DBG BAL decodePairListBytes failed: {}\n", .{err});
-            return error.InvalidBAL;
-        };
+        const code_changes = decodePairListBytes(alloc, &ep) catch return error.InvalidBAL;
 
         try entries.append(alloc, BalEntry{
             .address = addr,
@@ -157,12 +142,6 @@ fn decodePairListU64(alloc: std.mem.Allocator, ep: *[]const u8) ![]u64 {
 
 /// Decode a list of [blockAccessIndex, u256_value] pairs; return last u256_value per entry.
 fn decodePairListU256(alloc: std.mem.Allocator, ep: *[]const u8) ![]u256 {
-    if (ep.len > 0) {
-        var tmp: [8]u8 = @splat(0);
-        const n = @min(ep.len, 8);
-        @memcpy(tmp[0..n], ep.*[0..n]);
-        std.debug.print("DBG decodePairListU256 ep_len={} first8=0x{s}\n", .{ ep.len, std.fmt.bytesToHex(tmp, .lower) });
-    }
     const list_r = mpt.rlp.decodeItem(ep.*) catch return error.InvalidBAL;
     ep.* = ep.*[list_r.consumed..];
     var payload = switch (list_r.item) {

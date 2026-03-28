@@ -261,8 +261,10 @@ pub fn transitionWithDb(
             return error.GasLimitExceedsCap;
         }
 
-        // 1d. Transaction gas limit cannot exceed block gas limit.
-        if (tx.gas > env.gas_limit) {
+        // 1d. Transaction gas limit cannot exceed remaining block gas allowance.
+        // This catches both "tx.gas > gas_limit" (single tx too large) and
+        // "cumulative_gas + tx.gas > gas_limit" (block gas exhausted mid-block).
+        if (tx.gas > env.gas_limit - cumulative_gas) {
             return error.TxGasLimitExceedsBlockLimit;
         }
 
