@@ -154,15 +154,9 @@ pub const Chain = struct {
         if (hdr.block_access_list_hash) |expected_bal_hash| {
             if (result.bal_hash) |computed_bal_hash| {
                 if (!std.mem.eql(u8, &computed_bal_hash, &expected_bal_hash)) {
-                    std.debug.print("[BAL-MISMATCH] block={} expected={s} got={s}\n", .{
-                        hdr.number,
-                        std.fmt.bytesToHex(expected_bal_hash, .lower),
-                        std.fmt.bytesToHex(computed_bal_hash, .lower),
-                    });
                     return;
                 }
             } else {
-                std.debug.print("[BAL-NULL] block={}\n", .{hdr.number});
                 return; // Amsterdam+ block must have a BAL hash
             }
         }
