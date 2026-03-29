@@ -127,6 +127,7 @@ pub const Chain = struct {
         if (hdr.base_fee) |bf| env.base_fee = @as(u64, @intCast(bf));
         if (hdr.excess_blob_gas) |eg| env.excess_blob_gas = eg;
         if (hdr.parent_beacon_block_root) |pb| env.parent_beacon_block_root = pb;
+        if (hdr.slot_number) |sn| env.slot_number = sn;
 
         // ── Execute ───────────────────────────────────────────────────────────
         const result = transition_mod.transition(
@@ -148,6 +149,23 @@ pub const Chain = struct {
 
         const receipts_root = output_mod.computeReceiptsRoot(alloc, result.receipts) catch return;
         if (!std.mem.eql(u8, &receipts_root, &hdr.receipts_root)) return;
+
+        // ── BAL hash (EIP-7928, Amsterdam+) ───────────────────────────────────
+        if (hdr.block_access_list_hash) |expected_bal_hash| {
+            if (result.bal_hash) |computed_bal_hash| {
+                if (!std.mem.eql(u8, &computed_bal_hash, &expected_bal_hash)) {
+                    std.debug.print("[BAL-MISMATCH] block={} expected={s} got={s}\n", .{
+                        hdr.number,
+                        std.fmt.bytesToHex(expected_bal_hash, .lower),
+                        std.fmt.bytesToHex(computed_bal_hash, .lower),
+                    });
+                    return;
+                }
+            } else {
+                std.debug.print("[BAL-NULL] block={}\n", .{hdr.number});
+                return; // Amsterdam+ block must have a BAL hash
+            }
+        }
 
         // ── Commit ────────────────────────────────────────────────────────────
         self.current_alloc = result.alloc;

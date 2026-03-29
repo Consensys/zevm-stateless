@@ -342,6 +342,7 @@ pub fn build(b: *std.Build) void {
     });
     executor_bal_mod.addImport("primitives", primitives);
     executor_bal_mod.addImport("mpt", mpt_mod);
+    executor_bal_mod.addImport("executor_rlp_encode", executor_rlp_encode_mod);
 
     // executor_block_validation — block header validation (excess_blob_gas, etc.)
     const executor_block_validation_mod = b.createModule(.{
@@ -380,6 +381,7 @@ pub fn build(b: *std.Build) void {
     });
     native_executor_transition_mod.addImport("secp256k1_wrapper", secp256k1_impl_mod);
     native_executor_transition_mod.addImport("executor_allocator", executor_allocator_mod);
+    native_executor_transition_mod.addImport("executor_bal", executor_bal_mod);
 
     // native_executor_output — trie computations; uses executor_transition for type consistency
     const native_executor_output_mod = b.createModule(.{

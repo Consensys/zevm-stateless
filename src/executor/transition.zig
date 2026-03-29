@@ -20,6 +20,8 @@ const secp_wrapper = @import("secp256k1_wrapper");
 const output_mod = @import("executor_output");
 const alloc_mod = @import("executor_allocator");
 
+const bal_mod = @import("executor_bal");
+
 const tx_signing = @import("tx_signing.zig");
 const system_calls = @import("system_calls.zig");
 
@@ -41,6 +43,7 @@ pub const TransitionResult = struct {
     blob_gas_used: u64,
     accepted_txs: []input.TxInput,
     chain_id: u64,
+    bal_hash: ?[32]u8 = null,
 };
 
 // ─── Dummy block hash ─────────────────────────────────────────────────────────
@@ -49,6 +52,359 @@ const DUMMY_BLOCK_HASH: input.Hash = blk: {
     var h: input.Hash = undefined;
     @memset(&h, 0);
     break :blk h;
+};
+
+// ─── EIP-7928 Block Access List tracker ──────────────────────────────────────
+
+const SYSTEM_ADDRESS: input.Address = .{
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff,
+    0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xff, 0xfe,
+};
+
+const KnownAcct = struct {
+    balance: u256 = 0,
+    nonce: u64 = 0,
+    code_hash: primitives.Hash = primitives.KECCAK_EMPTY,
+};
+
+const BaTracker = struct {
+    alloc: std.mem.Allocator,
+    /// Reference to the InMemoryDB used for lazy committed-state initialization.
+    /// Allows correct BAL computation on the stateless path where pre_alloc_in is empty.
+    db: *database_mod.InMemoryDB,
+    // Last committed account state (updated after each phase)
+    committed: std.AutoHashMapUnmanaged(input.Address, KnownAcct),
+    committed_storage: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, u256)),
+    // Accumulated per-BAI changes
+    bal_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU256)),
+    nonce_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiU64)),
+    code_chg: std.AutoHashMapUnmanaged(input.Address, std.ArrayListUnmanaged(bal_mod.BaiCode)),
+    slot_chg: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, std.ArrayListUnmanaged(bal_mod.SlotBaiValue))),
+    // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
+    selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)),
+
+    fn initFromPreAlloc(a: std.mem.Allocator, pre: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount), db: *database_mod.InMemoryDB) BaTracker {
+        var self = BaTracker{
+            .alloc = a,
+            .db = db,
+            .committed = .{},
+            .committed_storage = .{},
+            .bal_chg = .{},
+            .nonce_chg = .{},
+            .code_chg = .{},
+            .slot_chg = .{},
+            .selfdestruct_reads = .{},
+        };
+        var it = pre.iterator();
+        while (it.next()) |e| {
+            const addr = e.key_ptr.*;
+            const acct = e.value_ptr.*;
+            const code_hash = if (acct.code_hash) |ch| ch else if (acct.code.len > 0) rlp.keccak256(acct.code) else primitives.KECCAK_EMPTY;
+            self.committed.put(a, addr, KnownAcct{
+                .balance = acct.balance,
+                .nonce = acct.nonce,
+                .code_hash = code_hash,
+            }) catch {};
+            if (acct.storage.count() > 0) {
+                var sm = std.AutoHashMapUnmanaged(u256, u256){};
+                var sit = acct.storage.iterator();
+                while (sit.next()) |se| {
+                    if (se.value_ptr.* != 0) sm.put(a, se.key_ptr.*, se.value_ptr.*) catch {};
+                }
+                self.committed_storage.put(a, addr, sm) catch {};
+            }
+        }
+        return self;
+    }
+
+    fn detectAndRecord(self: *BaTracker, bai: u64, ctx: *context_mod.Context) void {
+        const a = self.alloc;
+        var it = ctx.journaled_state.inner.evm_state.iterator();
+        while (it.next()) |e| {
+            const addr = e.key_ptr.*;
+            const acct = e.value_ptr.*;
+            if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
+
+            // Same-tx-created-and-selfdestructed (ephemeral) account: per EIP-7928 spec's
+            // destroy_storage(), storage writes become reads and all other changes are suppressed.
+            if (acct.status.self_destructed) {
+                var stor_it = acct.storage.iterator();
+                while (stor_it.next()) |se| {
+                    if (!se.value_ptr.*.was_written) continue;
+                    const sm = self.selfdestruct_reads.getOrPut(a, addr) catch continue;
+                    if (!sm.found_existing) sm.value_ptr.* = .{};
+                    sm.value_ptr.*.put(a, se.key_ptr.*, {}) catch {};
+                }
+                continue;
+            }
+
+            const known = blk: {
+                if (self.committed.get(addr)) |k| break :blk k;
+                // Lazy init: query DB for pre-block state (handles stateless path where
+                // pre_alloc_in is empty and committed was not seeded for this account).
+                const pre = self.db.basic(addr) catch null;
+                const k: KnownAcct = if (pre) |p| .{
+                    .balance = p.balance,
+                    .nonce = p.nonce,
+                    .code_hash = p.code_hash,
+                } else KnownAcct{};
+                self.committed.put(self.alloc, addr, k) catch {};
+                break :blk k;
+            };
+
+            // Balance
+            if (acct.info.balance != known.balance) {
+                const entry = self.bal_chg.getOrPutValue(a, addr, .{}) catch continue;
+                entry.value_ptr.*.append(a, bal_mod.BaiU256{ .bai = bai, .value = acct.info.balance }) catch {};
+            }
+
+            // Nonce
+            if (acct.info.nonce != known.nonce) {
+                const entry = self.nonce_chg.getOrPutValue(a, addr, .{}) catch continue;
+                entry.value_ptr.*.append(a, bal_mod.BaiU64{ .bai = bai, .value = acct.info.nonce }) catch {};
+            }
+
+            // Code
+            if (!std.mem.eql(u8, &acct.info.code_hash, &known.code_hash)) {
+                const code_bytes: []const u8 = blk: {
+                    if (std.mem.eql(u8, &acct.info.code_hash, &primitives.KECCAK_EMPTY)) break :blk &.{};
+                    if (acct.info.code) |bc| {
+                        if (bc == .eip7702) {
+                            const buf = a.alloc(u8, 23) catch break :blk &.{};
+                            buf[0] = 0xEF;
+                            buf[1] = 0x01;
+                            buf[2] = 0x00;
+                            @memcpy(buf[3..], &bc.eip7702.address);
+                            break :blk buf;
+                        }
+                        break :blk bc.originalBytes();
+                    }
+                    if (ctx.journaled_state.database.codeByHash(acct.info.code_hash)) |db_bc| {
+                        if (db_bc == .eip7702) {
+                            const buf = a.alloc(u8, 23) catch break :blk &.{};
+                            buf[0] = 0xEF;
+                            buf[1] = 0x01;
+                            buf[2] = 0x00;
+                            @memcpy(buf[3..], &db_bc.eip7702.address);
+                            break :blk buf;
+                        }
+                        break :blk db_bc.originalBytes();
+                    } else |_| break :blk &.{};
+                };
+                const entry = self.code_chg.getOrPutValue(a, addr, .{}) catch continue;
+                entry.value_ptr.*.append(a, bal_mod.BaiCode{ .bai = bai, .code = code_bytes }) catch {};
+            }
+
+            // Storage changes: slots written in this phase
+            var stor_it = acct.storage.iterator();
+            while (stor_it.next()) |se| {
+                if (!se.value_ptr.*.was_written) continue;
+                const slot = se.key_ptr.*;
+                const present = se.value_ptr.*.present_value;
+                const committed_val: u256 = blk_slot: {
+                    if (self.committed_storage.get(addr)) |sm| {
+                        if (sm.get(slot)) |v| break :blk_slot v;
+                    }
+                    // Lazy init: query DB for the pre-block value (handles stateless path).
+                    const db_val = self.db.storage(addr, slot) catch 0;
+                    if (db_val != 0) {
+                        const sm2 = self.committed_storage.getOrPut(self.alloc, addr) catch break :blk_slot db_val;
+                        if (!sm2.found_existing) sm2.value_ptr.* = .{};
+                        sm2.value_ptr.*.put(self.alloc, slot, db_val) catch {};
+                    }
+                    break :blk_slot db_val;
+                };
+                if (present == committed_val) continue;
+                const addr_map = self.slot_chg.getOrPut(a, addr) catch continue;
+                if (!addr_map.found_existing) addr_map.value_ptr.* = .{};
+                const slot_list = addr_map.value_ptr.*.getOrPutValue(a, slot, .{}) catch continue;
+                slot_list.value_ptr.*.append(a, bal_mod.SlotBaiValue{ .bai = bai, .value = present }) catch {};
+            }
+        }
+
+        // Update committed state to current evm_state
+        var it2 = ctx.journaled_state.inner.evm_state.iterator();
+        while (it2.next()) |e| {
+            const addr = e.key_ptr.*;
+            const acct = e.value_ptr.*;
+            if (acct.status.loaded_as_not_existing and !acct.status.touched) continue;
+            self.committed.put(a, addr, KnownAcct{
+                .balance = acct.info.balance,
+                .nonce = acct.info.nonce,
+                .code_hash = acct.info.code_hash,
+            }) catch {};
+            var stor_it = acct.storage.iterator();
+            while (stor_it.next()) |se| {
+                if (!se.value_ptr.*.was_written) continue;
+                const sm = self.committed_storage.getOrPut(a, addr) catch continue;
+                if (!sm.found_existing) sm.value_ptr.* = .{};
+                sm.value_ptr.*.put(a, se.key_ptr.*, se.value_ptr.*.present_value) catch {};
+            }
+        }
+    }
+
+    fn computeHash(self: *BaTracker, a: std.mem.Allocator, ctx: *context_mod.Context, gas_limit: u64) ![32]u8 {
+        // Collect storage reads: all accessed slots NOT in slot_chg.
+        // Includes pure reads (was_written=false) AND net-zero writes (was_written=true
+        // but value returned to original, so absent from slot_chg).
+        var storage_reads = std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)){};
+        {
+            var it = ctx.journaled_state.inner.evm_state.iterator();
+            while (it.next()) |e| {
+                const addr = e.key_ptr.*;
+                var stor_it = e.value_ptr.*.storage.iterator();
+                while (stor_it.next()) |se| {
+                    const slot = se.key_ptr.*;
+                    const in_slot_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
+                    if (in_slot_chg) continue;
+                    const sm = storage_reads.getOrPut(a, addr) catch continue;
+                    if (!sm.found_existing) sm.value_ptr.* = .{};
+                    sm.value_ptr.*.put(a, slot, {}) catch {};
+                }
+            }
+        }
+        // Also include selfdestruct-converted reads (slots written before same-tx SELFDESTRUCT).
+        {
+            var it = self.selfdestruct_reads.iterator();
+            while (it.next()) |e| {
+                const addr = e.key_ptr.*;
+                var sit = e.value_ptr.*.keyIterator();
+                while (sit.next()) |slot_ptr| {
+                    const slot = slot_ptr.*;
+                    const in_slot_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
+                    if (in_slot_chg) continue;
+                    const sm = storage_reads.getOrPut(a, addr) catch continue;
+                    if (!sm.found_existing) sm.value_ptr.* = .{};
+                    sm.value_ptr.*.put(a, slot, {}) catch {};
+                }
+            }
+        }
+
+        // Collect all addresses that were accessed during block execution.
+        var all_addrs = std.AutoHashMapUnmanaged(input.Address, void){};
+        {
+            var it = ctx.journaled_state.inner.evm_state.iterator();
+            while (it.next()) |e| {
+                const addr = e.key_ptr.*;
+                const acct = e.value_ptr.*;
+                // Exclude OOG-phantom accounts: explicitly untracked and never modified.
+                if (!acct.status.touched and self.db.isOogAddress(addr)) continue;
+                all_addrs.put(a, addr, {}) catch {};
+            }
+        }
+        {
+            var it = self.bal_chg.keyIterator();
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+        }
+        {
+            var it = self.nonce_chg.keyIterator();
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+        }
+        {
+            var it = self.code_chg.keyIterator();
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+        }
+        {
+            var it = self.slot_chg.keyIterator();
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+        }
+        {
+            var it = storage_reads.keyIterator();
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+        }
+        // Include selfdestruct_reads addresses (ephemeral accounts with storage reads).
+        {
+            var it = self.selfdestruct_reads.keyIterator();
+            while (it.next()) |k| all_addrs.put(a, k.*, {}) catch {};
+        }
+
+        var entries = std.ArrayListUnmanaged(bal_mod.EncodeEntry){};
+
+        var addr_it = all_addrs.keyIterator();
+        while (addr_it.next()) |addr_ptr| {
+            const addr = addr_ptr.*;
+
+            // Exclude SYSTEM_ADDRESS unless it has a non-zero final balance
+            if (std.mem.eql(u8, &addr, &SYSTEM_ADDRESS)) {
+                const final = self.committed.get(addr) orelse KnownAcct{};
+                if (final.balance == 0) continue;
+            }
+
+            // Build storage_changes sorted by slot
+            var sc_list = std.ArrayListUnmanaged(bal_mod.EncodeSlotChange){};
+            if (self.slot_chg.get(addr)) |slot_map| {
+                var sit = slot_map.iterator();
+                while (sit.next()) |se| {
+                    try sc_list.append(a, bal_mod.EncodeSlotChange{
+                        .slot = se.key_ptr.*,
+                        .changes = se.value_ptr.*.items,
+                    });
+                }
+                std.mem.sort(bal_mod.EncodeSlotChange, sc_list.items, {}, struct {
+                    pub fn lessThan(_: void, x: bal_mod.EncodeSlotChange, y: bal_mod.EncodeSlotChange) bool {
+                        return x.slot < y.slot;
+                    }
+                }.lessThan);
+            }
+
+            // Build storage_reads (not-changed slots), sorted, excluding those in slot_chg
+            var sr_list = std.ArrayListUnmanaged(u256){};
+            if (storage_reads.get(addr)) |sr_map| {
+                var sit = sr_map.keyIterator();
+                while (sit.next()) |slot_ptr| {
+                    const slot = slot_ptr.*;
+                    const in_chg = if (self.slot_chg.get(addr)) |sm| sm.contains(slot) else false;
+                    if (!in_chg) try sr_list.append(a, slot);
+                }
+                std.mem.sort(u256, sr_list.items, {}, struct {
+                    pub fn lessThan(_: void, x: u256, y: u256) bool {
+                        return x < y;
+                    }
+                }.lessThan);
+            }
+
+            // Ephemeral accounts (selfdestruct_reads only) have no balance/nonce/code changes.
+            const is_ephemeral = self.selfdestruct_reads.contains(addr) and
+                !self.bal_chg.contains(addr) and !self.nonce_chg.contains(addr) and
+                !self.code_chg.contains(addr) and !self.slot_chg.contains(addr);
+
+            const bc_items: []const bal_mod.BaiU256 = if (!is_ephemeral) (if (self.bal_chg.get(addr)) |l| l.items else &.{}) else &.{};
+            const nc_items: []const bal_mod.BaiU64 = if (!is_ephemeral) (if (self.nonce_chg.get(addr)) |l| l.items else &.{}) else &.{};
+            const cc_items: []const bal_mod.BaiCode = if (!is_ephemeral) (if (self.code_chg.get(addr)) |l| l.items else &.{}) else &.{};
+
+            try entries.append(a, bal_mod.EncodeEntry{
+                .address = addr,
+                .storage_changes = sc_list.items,
+                .storage_reads = sr_list.items,
+                .balance_changes = bc_items,
+                .nonce_changes = nc_items,
+                .code_changes = cc_items,
+            });
+        }
+
+        std.mem.sort(bal_mod.EncodeEntry, entries.items, {}, struct {
+            pub fn lessThan(_: void, x: bal_mod.EncodeEntry, y: bal_mod.EncodeEntry) bool {
+                return std.mem.lessThan(u8, &x.address, &y.address);
+            }
+        }.lessThan);
+
+        // EIP-7928: validate BAL item count <= gas_limit // GAS_BLOCK_ACCESS_LIST_ITEM (2000).
+        // Each address and each unique storage slot counts as one item.
+        const GAS_BLOCK_ACCESS_LIST_ITEM: u64 = 2000;
+        var bal_items: u64 = 0;
+        for (entries.items) |entry| {
+            bal_items += 1; // address
+            var unique_slots = std.AutoHashMapUnmanaged(u256, void){};
+            for (entry.storage_changes) |sc| unique_slots.put(a, sc.slot, {}) catch {};
+            for (entry.storage_reads) |sr| unique_slots.put(a, sr, {}) catch {};
+            bal_items += unique_slots.count();
+        }
+        if (bal_items > gas_limit / GAS_BLOCK_ACCESS_LIST_ITEM) {
+            return error.BalGasLimitExceeded;
+        }
+
+        return bal_mod.encodeAndHash(a, entries.items);
+    }
 };
 
 // ─── Pre-state loader ─────────────────────────────────────────────────────────
@@ -184,8 +540,16 @@ pub fn transitionWithDb(
     var instructions = handler_mod.Instructions.new(spec);
     var precompiles = handler_mod.Precompiles.new(spec);
 
+    // ── EIP-7928 BAL tracker (Amsterdam+) ────────────────────────────────────
+    var tracker: ?BaTracker = if (primitives.isEnabledIn(spec, .amsterdam))
+        BaTracker.initFromPreAlloc(arena, pre_alloc_in, &ctx.journaled_state.database)
+    else
+        null;
+
     // ── Pre-block system calls (EIP-4788, EIP-2935) ───────────────────────────
     system_calls.applyPreBlockCalls(&ctx, &instructions, &precompiles, env, spec, chain_id);
+
+    if (tracker) |*t| t.detectAndRecord(0, &ctx);
 
     var receipts = std.ArrayListUnmanaged(Receipt){};
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput){};
@@ -602,6 +966,8 @@ pub fn transitionWithDb(
 
         exec_result.deinit();
 
+        if (tracker) |*t| t.detectAndRecord(tx_idx + 1, &ctx);
+
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         if (!primitives.isEnabledIn(spec, .byzantium)) {
             const per_tx_alloc = extractPostState(arena, pre_alloc_in, &ctx) catch null;
@@ -643,6 +1009,9 @@ pub fn transitionWithDb(
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
     system_calls.applyPostBlockCalls(&ctx, &instructions, &precompiles, spec, chain_id);
 
+    // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
+    if (tracker) |*t| t.detectAndRecord(txs.len + 1, &ctx);
+
     // ── Extract post-state ────────────────────────────────────────────────────
     const post_alloc = try extractPostState(arena, pre_alloc_in, &ctx);
 
@@ -657,6 +1026,8 @@ pub fn transitionWithDb(
         }
     }
 
+    const bal_hash: ?[32]u8 = if (tracker) |*t| t.computeHash(arena, &ctx, env.gas_limit) catch null else null;
+
     return TransitionResult{
         .alloc = post_alloc,
         .deleted_accounts = try deleted.toOwnedSlice(arena),
@@ -668,6 +1039,7 @@ pub fn transitionWithDb(
         .blob_gas_used = total_blob_gas,
         .accepted_txs = try accepted_txs.toOwnedSlice(arena),
         .chain_id = chain_id,
+        .bal_hash = bal_hash,
     };
 }
 

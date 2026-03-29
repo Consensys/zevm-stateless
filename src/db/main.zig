@@ -217,6 +217,13 @@ pub const WitnessDatabase = struct {
         _ = self.pending_accounts.remove(address);
     }
 
+    /// Returns true if the address is in the committed or pending access log.
+    /// Used by BaTracker to distinguish legitimately-accessed nonexistent accounts
+    /// from those only loaded for OOG gas calculation (which are removed via untrackPendingAddress).
+    pub fn isTrackedAddress(self: *Self, address: primitives.Address) bool {
+        return self.pre_accounts.contains(address) or self.pending_accounts.contains(address);
+    }
+
     /// Force-add an address to the current-tx pending access log with an empty
     /// pre-state snapshot. Used for EIP-7702 delegation targets that are accessed
     /// (their code executes) but whose account state is not proven in the witness.
@@ -251,7 +258,19 @@ pub const WitnessDatabase = struct {
         ) catch |err| switch (err) {
             // InvalidProof means the witness doesn't include proof nodes for this account.
             // Treat as non-existent (e.g., precompile addresses have no witness proof).
-            error.InvalidProof => return null,
+            // Still track the access so EIP-7928 BAL includes it; untrackPendingAddress()
+            // will remove it later if the access turns out to be an OOG gas-calc phantom.
+            error.InvalidProof => {
+                if (!self.pre_accounts.contains(address) and !self.pending_accounts.contains(address)) {
+                    self.pending_accounts.put(self.tracking_alloc, address, .{}) catch {};
+                    if (self.frame_accounts.items.len > 0) {
+                        self.frame_accounts.items[self.frame_accounts.items.len - 1].append(
+                            self.tracking_alloc, address,
+                        ) catch {};
+                    }
+                }
+                return null;
+            },
             // Any other error (InvalidNode, InvalidRlp, InvalidHp) means corrupt witness data.
             else => return DbError.InvalidWitness,
         };
@@ -378,6 +397,7 @@ pub const WitnessDatabase = struct {
             .force_track_address = forceTrackAddressFallback,
             .pre_commit_tx_slot = preCommitTxSlotFallback,
             .notify_storage_read = notifyStorageReadFallback,
+            .is_tracked_address = isTrackedAddressFallback,
         };
     }
 
@@ -439,6 +459,11 @@ pub const WitnessDatabase = struct {
     fn preCommitTxSlotFallback(ctx: *anyopaque, address: primitives.Address, slot: primitives.StorageKey, committed_value: primitives.StorageValue) void {
         const self: *Self = @ptrCast(@alignCast(ctx));
         self.notifyStorageSlotCommit(address, slot, committed_value);
+    }
+
+    fn isTrackedAddressFallback(ctx: *anyopaque, address: primitives.Address) bool {
+        const self: *Self = @ptrCast(@alignCast(ctx));
+        return self.isTrackedAddress(address);
     }
 
     fn notifyStorageReadFallback(ctx: *anyopaque, address: primitives.Address, slot: primitives.StorageKey) void {
