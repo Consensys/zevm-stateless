@@ -289,8 +289,7 @@ pub fn runFixture(
                 reward,
             ) catch |exec_err| {
                 if (expect_exception_str) |expected| {
-                    const classified = executor_exceptions.mapBlockError(exec_err)
-                        orelse executor_exceptions.mapTransactionError(exec_err);
+                    const classified = executor_exceptions.mapBlockError(exec_err) orelse executor_exceptions.mapTransactionError(exec_err);
                     if (!matchesException(expected, classified)) {
                         if (!std.mem.startsWith(u8, expected, executor_exceptions.block_exception_prefix)) {
                             test_failed = true;
@@ -303,8 +302,7 @@ pub fn runFixture(
                     // No exception was expected but execution failed — log and fail.
                     test_failed = true;
                     if (!quiet) {
-                        const classified = executor_exceptions.mapBlockError(exec_err)
-                            orelse executor_exceptions.mapTransactionError(exec_err);
+                        const classified = executor_exceptions.mapBlockError(exec_err) orelse executor_exceptions.mapTransactionError(exec_err);
                         std.debug.print("FAIL {s} unexpected exception '{s}' (block {})\n", .{ test_name, classified, env.number });
                     }
                 }

@@ -265,7 +265,8 @@ pub const WitnessDatabase = struct {
                     self.pending_accounts.put(self.tracking_alloc, address, .{}) catch {};
                     if (self.frame_accounts.items.len > 0) {
                         self.frame_accounts.items[self.frame_accounts.items.len - 1].append(
-                            self.tracking_alloc, address,
+                            self.tracking_alloc,
+                            address,
                         ) catch {};
                     }
                 }
@@ -288,7 +289,8 @@ pub const WitnessDatabase = struct {
             // Record in current frame for rollback on revertFrame.
             if (self.frame_accounts.items.len > 0) {
                 self.frame_accounts.items[self.frame_accounts.items.len - 1].append(
-                    self.tracking_alloc, address,
+                    self.tracking_alloc,
+                    address,
                 ) catch {};
             }
         }
@@ -360,7 +362,8 @@ pub const WitnessDatabase = struct {
                 // Record in current frame for rollback on revertFrame.
                 if (self.frame_storage.items.len > 0) {
                     self.frame_storage.items[self.frame_storage.items.len - 1].append(
-                        self.tracking_alloc, .{ .addr = address, .slot = index },
+                        self.tracking_alloc,
+                        .{ .addr = address, .slot = index },
                     ) catch {};
                 }
             }
@@ -478,7 +481,8 @@ pub const WitnessDatabase = struct {
             addr_entry.value_ptr.*.put(self.tracking_alloc, slot, 0) catch {};
             if (self.frame_storage.items.len > 0) {
                 self.frame_storage.items[self.frame_storage.items.len - 1].append(
-                    self.tracking_alloc, .{ .addr = address, .slot = slot },
+                    self.tracking_alloc,
+                    .{ .addr = address, .slot = slot },
                 ) catch {};
             }
         }

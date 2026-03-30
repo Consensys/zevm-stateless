@@ -3,7 +3,6 @@
 /// Used in `expectException` fixture fields and in `RejectedTx.err` strings.
 /// Call `.name()` to produce the `"TransactionException.FOO"` string expected by
 /// the test runner's exception-matching logic.
-
 pub const TransactionException = enum {
     GAS_ALLOWANCE_EXCEEDED,
     GAS_LIMIT_EXCEEDS_MAXIMUM,

@@ -267,7 +267,6 @@ fn buildAccessedEntries(
         });
     }
 
-
     std.mem.sort(types.AccessedEntry, entries.items, {}, struct {
         pub fn lessThan(_: void, a: types.AccessedEntry, b: types.AccessedEntry) bool {
             return std.mem.lessThan(u8, &a.address, &b.address);
