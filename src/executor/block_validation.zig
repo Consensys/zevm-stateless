@@ -57,6 +57,13 @@ pub fn validateBlock(env: types.Env, spec: primitives.SpecId) !void {
         };
     }
 
+    // BLOCK_RLP_TOO_LARGE (EIP-7934, Osaka+)
+    if (primitives.isEnabledIn(spec, .osaka)) {
+        if (env.block_rlp_size) |sz| {
+            if (sz > 8_388_608) return error.BlockRlpTooLarge;
+        }
+    }
+
     // PRE_FORK_BLOB_FIELDS: blob header fields must not appear before Cancun
     if (!primitives.isEnabledIn(spec, .cancun)) {
         if (env.excess_blob_gas != null or env.blob_gas_used_header != null)

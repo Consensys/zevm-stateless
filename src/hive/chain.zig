@@ -127,6 +127,7 @@ pub const Chain = struct {
         if (hdr.excess_blob_gas) |eg| env.excess_blob_gas = eg;
         if (hdr.blob_gas_used) |bgu| env.blob_gas_used_header = bgu;
         if (hdr.parent_beacon_block_root) |pb| env.parent_beacon_block_root = pb;
+        env.block_rlp_size = block_rlp.len;
         if (hdr.slot_number) |sn| env.slot_number = sn;
 
         // ── Parent-derived fields for block validation ────────────────────────
