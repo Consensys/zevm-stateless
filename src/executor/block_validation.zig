@@ -57,6 +57,12 @@ pub fn validateBlock(env: types.Env, spec: primitives.SpecId) !void {
         };
     }
 
+    // PRE_FORK_BLOB_FIELDS: blob header fields must not appear before Cancun
+    if (!primitives.isEnabledIn(spec, .cancun)) {
+        if (env.excess_blob_gas != null or env.blob_gas_used_header != null)
+            return error.UnexpectedBlobFields;
+    }
+
     // INCORRECT_EXCESS_BLOB_GAS (EIP-4844, Cancun+)
     if (primitives.isEnabledIn(spec, .cancun)) {
         if (env.parent_excess_blob_gas) |pebg| if (env.parent_blob_gas_used) |pbgu| {
@@ -105,10 +111,13 @@ pub fn blobGasMax(spec: primitives.SpecId) u64 {
 ///   total_gas_used — cumulative gas from all transactions (result.cumulative_gas)
 ///   blob_gas_used  — total blob gas from type-3 transactions (result.blob_gas_used)
 pub fn validatePostExecution(
+    alloc: std.mem.Allocator,
     env: types.Env,
     spec: primitives.SpecId,
     total_gas_used: u64,
     blob_gas_used: u64,
+    block_access_list: []const u8,
+    accessed: []const types.AccessedEntry,
 ) !void {
     // INVALID_GAS_USED_ABOVE_LIMIT: header gasUsed > gasLimit
     if (env.gas_used_header) |declared| {
@@ -136,6 +145,67 @@ pub fn validatePostExecution(
         // INCORRECT_BLOB_GAS_USED: computed blob gas ≠ header's declared blobGasUsed
         if (env.blob_gas_used_header) |declared| {
             if (blob_gas_used != declared) return error.IncorrectBlobGasUsed;
+        }
+    }
+
+    // INVALID_BLOCK_ACCESS_LIST (EIP-7928, Amsterdam+)
+    if (primitives.isEnabledIn(spec, .amsterdam)) {
+        if (block_access_list.len == 0) {
+            if (accessed.len != 0) return error.InvalidBlockAccessList;
+        } else {
+            const declared = bal.decode(alloc, block_access_list) catch {
+                return error.InvalidBlockAccessList;
+            };
+
+            // Verify declared is strictly ascending by address (canonical BAL order)
+            for (1..@max(1, declared.len)) |i| {
+                if (std.mem.order(u8, &declared[i - 1].address, &declared[i].address) != .lt) {
+                    return error.InvalidBlockAccessList;
+                }
+            }
+
+            if (declared.len != accessed.len) return error.InvalidBlockAccessList;
+
+            for (declared, accessed) |decl, comp| {
+                if (!std.mem.eql(u8, &decl.address, &comp.address)) return error.InvalidBlockAccessList;
+
+                if (comp.pre_nonce != comp.post_nonce) {
+                    if (decl.nonce_changes.len == 0) return error.InvalidBlockAccessList;
+                    if (decl.nonce_changes[decl.nonce_changes.len - 1] != comp.post_nonce) return error.InvalidBlockAccessList;
+                } else {
+                    if (decl.nonce_changes.len != 0) return error.InvalidBlockAccessList;
+                }
+
+                if (decl.balance_changes.len != 0) {
+                    if (decl.balance_changes[decl.balance_changes.len - 1] != comp.post_balance) return error.InvalidBlockAccessList;
+                } else if (comp.pre_balance != comp.post_balance) {
+                    return error.InvalidBlockAccessList;
+                }
+
+                if (decl.code_changes.len != 0) {
+                    const last_code = decl.code_changes[decl.code_changes.len - 1];
+                    var last_code_hash: primitives.Hash = primitives.KECCAK_EMPTY;
+                    if (last_code.len > 0) {
+                        var h = std.crypto.hash.sha3.Keccak256.init(.{});
+                        h.update(last_code);
+                        h.final(&last_code_hash);
+                    }
+                    if (!std.mem.eql(u8, &last_code_hash, &comp.post_code_hash)) return error.InvalidBlockAccessList;
+                } else {
+                    if (!std.mem.eql(u8, &comp.pre_code_hash, &comp.post_code_hash)) return error.InvalidBlockAccessList;
+                }
+
+                if (decl.storage_changes.len != comp.storage_changes.len) return error.InvalidBlockAccessList;
+                for (decl.storage_changes, comp.storage_changes) |ds, cs| {
+                    if (!std.mem.eql(u8, &ds.slot, &cs.slot)) return error.InvalidBlockAccessList;
+                    if (ds.post_value != cs.post_value) return error.InvalidBlockAccessList;
+                }
+
+                if (decl.storage_reads.len != comp.storage_reads.len) return error.InvalidBlockAccessList;
+                for (decl.storage_reads, comp.storage_reads) |dr, cr| {
+                    if (!std.mem.eql(u8, &dr, &cr)) return error.InvalidBlockAccessList;
+                }
+            }
         }
     }
 }
@@ -211,87 +281,3 @@ fn fakeBlobGasPrice(excess_blob_gas: u64, update_fraction: u64) u128 {
 }
 
 const std = @import("std");
-
-/// Post-execution BAL validation (EIP-7928, Amsterdam+).
-/// `accessed` must be sorted ascending by address (as returned by buildAccessedEntries).
-pub fn validateBlockAccessList(
-    alloc: std.mem.Allocator,
-    declared_bytes: []const u8,
-    accessed: []const types.AccessedEntry,
-    spec: primitives.SpecId,
-) !void {
-    if (!primitives.isEnabledIn(spec, .amsterdam)) return;
-
-    if (declared_bytes.len == 0) {
-        if (accessed.len == 0) return;
-        return error.InvalidBlockAccessList;
-    }
-
-    const declared = bal.decode(alloc, declared_bytes) catch |err| {
-        std.debug.print("[BAL-DECODE-ERR] {}\n", .{err});
-        return error.InvalidBlockAccessList;
-    };
-
-    // Verify declared is strictly ascending by address (canonical BAL order)
-    for (1..@max(1, declared.len)) |i| {
-        if (std.mem.order(u8, &declared[i - 1].address, &declared[i].address) != .lt) {
-            return error.InvalidBlockAccessList;
-        }
-    }
-
-    if (declared.len != accessed.len) return error.InvalidBlockAccessList;
-
-    for (declared, accessed) |decl, comp| {
-        if (!std.mem.eql(u8, &decl.address, &comp.address)) return error.InvalidBlockAccessList;
-
-        // Nonce: non-empty iff changed; last entry == post_nonce
-        if (comp.pre_nonce != comp.post_nonce) {
-            if (decl.nonce_changes.len == 0) return error.InvalidBlockAccessList;
-            if (decl.nonce_changes[decl.nonce_changes.len - 1] != comp.post_nonce) return error.InvalidBlockAccessList;
-        } else {
-            if (decl.nonce_changes.len != 0) return error.InvalidBlockAccessList;
-        }
-
-        // Balance: last entry must equal post_balance; empty iff no net change AND no intermediate changes.
-        // Note: EIP-7928 records ALL per-tx balance changes, including those that net to zero
-        // (e.g., funded in tx0 and fully spent in tx1).  We can't detect intermediate-only changes
-        // without per-tx tracking, so we accept decl.balance_changes.len != 0 even when pre==post,
-        // as long as the last entry equals the final balance.
-        if (decl.balance_changes.len != 0) {
-            if (decl.balance_changes[decl.balance_changes.len - 1] != comp.post_balance) return error.InvalidBlockAccessList;
-        } else if (comp.pre_balance != comp.post_balance) {
-            return error.InvalidBlockAccessList;
-        }
-
-        // Code: last code_change (if any) must match post_code_hash.
-        // EIP-7928 records ALL per-tx code changes, including intermediate ones that net
-        // to zero (e.g., delegation set in tx0 then cleared in tx1 = 2 code_changes with
-        // pre_code_hash == post_code_hash).  Mirror the balance_changes logic: accept
-        // non-empty code_changes as long as the last entry hashes to post_code_hash.
-        if (decl.code_changes.len != 0) {
-            const last_code = decl.code_changes[decl.code_changes.len - 1];
-            var last_code_hash: primitives.Hash = primitives.KECCAK_EMPTY;
-            if (last_code.len > 0) {
-                var h = std.crypto.hash.sha3.Keccak256.init(.{});
-                h.update(last_code);
-                h.final(&last_code_hash);
-            }
-            if (!std.mem.eql(u8, &last_code_hash, &comp.post_code_hash)) return error.InvalidBlockAccessList;
-        } else {
-            if (!std.mem.eql(u8, &comp.pre_code_hash, &comp.post_code_hash)) return error.InvalidBlockAccessList;
-        }
-
-        // Storage changes: exact sorted match on {slot, post_value}
-        if (decl.storage_changes.len != comp.storage_changes.len) return error.InvalidBlockAccessList;
-        for (decl.storage_changes, comp.storage_changes) |ds, cs| {
-            if (!std.mem.eql(u8, &ds.slot, &cs.slot)) return error.InvalidBlockAccessList;
-            if (ds.post_value != cs.post_value) return error.InvalidBlockAccessList;
-        }
-
-        // Storage reads: exact sorted match
-        if (decl.storage_reads.len != comp.storage_reads.len) return error.InvalidBlockAccessList;
-        for (decl.storage_reads, comp.storage_reads) |dr, cr| {
-            if (!std.mem.eql(u8, &dr, &cr)) return error.InvalidBlockAccessList;
-        }
-    }
-}

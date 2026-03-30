@@ -6,8 +6,7 @@
 const std = @import("std");
 const primitives = @import("primitives");
 const types = @import("executor_types");
-const transition_mod = @import("executor_transition");
-const output_mod = @import("executor_output");
+const executor = @import("executor");
 const fork_mod = @import("hardfork");
 const tx_decode_mod = @import("executor_tx_decode");
 const rlp_dec = @import("mpt").rlp;
@@ -126,11 +125,20 @@ pub const Chain = struct {
         }
         if (hdr.base_fee) |bf| env.base_fee = @as(u64, @intCast(bf));
         if (hdr.excess_blob_gas) |eg| env.excess_blob_gas = eg;
+        if (hdr.blob_gas_used) |bgu| env.blob_gas_used_header = bgu;
         if (hdr.parent_beacon_block_root) |pb| env.parent_beacon_block_root = pb;
         if (hdr.slot_number) |sn| env.slot_number = sn;
 
-        // ── Execute ───────────────────────────────────────────────────────────
-        const result = transition_mod.transition(
+        // ── Parent-derived fields for block validation ────────────────────────
+        const parent_hdr = self.headers.items[self.headers.items.len - 1];
+        env.parent_timestamp = parent_hdr.timestamp;
+        env.parent_gas_limit = parent_hdr.gas_limit;
+        if (parent_hdr.base_fee) |pbf| env.parent_base_fee = @as(u64, @intCast(pbf));
+        if (parent_hdr.excess_blob_gas) |pebg| env.parent_excess_blob_gas = pebg;
+        if (parent_hdr.blob_gas_used) |pbgu| env.parent_blob_gas_used = pbgu;
+
+        // ── Execute (includes validation, transition, and root computation) ────
+        const result = executor.executeBlockFromAlloc(
             alloc,
             self.current_alloc,
             env,
@@ -138,31 +146,21 @@ pub const Chain = struct {
             spec,
             self.fork.chain_id,
             reward,
-        ) catch return; // execution error = invalid block, discard
+        ) catch return; // any error = invalid block, discard
 
-        // ── Verify state root ─────────────────────────────────────────────────
-        const post_state_root = output_mod.computeStateRoot(alloc, result.alloc, &.{}) catch return;
-        if (!std.mem.eql(u8, &post_state_root, &hdr.state_root)) return;
-
-        // Pre-Byzantium: per-tx state roots are computed inside transition().
-        // Each receipt already has .state_root set correctly.
-
-        const receipts_root = output_mod.computeReceiptsRoot(alloc, result.receipts) catch return;
-        if (!std.mem.eql(u8, &receipts_root, &hdr.receipts_root)) return;
+        // ── Verify roots match header ─────────────────────────────────────────
+        if (!std.mem.eql(u8, &result.post_state_root, &hdr.state_root)) return;
+        if (!std.mem.eql(u8, &result.receipts_root, &hdr.receipts_root)) return;
 
         // ── BAL hash (EIP-7928, Amsterdam+) ───────────────────────────────────
         if (hdr.block_access_list_hash) |expected_bal_hash| {
             if (result.bal_hash) |computed_bal_hash| {
-                if (!std.mem.eql(u8, &computed_bal_hash, &expected_bal_hash)) {
-                    return;
-                }
-            } else {
-                return; // Amsterdam+ block must have a BAL hash
-            }
+                if (!std.mem.eql(u8, &computed_bal_hash, &expected_bal_hash)) return;
+            } else return; // Amsterdam+ block must have a BAL hash
         }
 
         // ── Commit ────────────────────────────────────────────────────────────
-        self.current_alloc = result.alloc;
+        self.current_alloc = result.post_alloc;
         const extra_data_copy = alloc.dupe(u8, hdr.extra_data) catch &.{};
         self.headers.append(alloc, .{
             .number = hdr.number,

@@ -638,10 +638,10 @@ pub fn build(b: *std.Build) void {
                 .{ .name = "mpt", .module = mpt_mod },
                 .{ .name = "executor_types", .module = executor_types_mod },
                 .{ .name = "executor_rlp_encode", .module = executor_rlp_encode_mod },
-                .{ .name = "executor_transition", .module = native_executor_transition_mod },
                 .{ .name = "executor_output", .module = native_executor_output_mod },
                 .{ .name = "hardfork", .module = hardfork_mod },
                 .{ .name = "executor_tx_decode", .module = native_executor_tx_decode_mod },
+                .{ .name = "executor", .module = executor_mod },
             },
         }),
     });

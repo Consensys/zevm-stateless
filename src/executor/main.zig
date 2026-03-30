@@ -284,6 +284,7 @@ pub const ExecuteBlockResult = struct {
     receipts_root: [32]u8,
     post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
     receipts: []transition_mod.Receipt,
+    bal_hash: ?types.Hash = null,
 };
 
 pub fn executeBlockFromAlloc(
@@ -297,7 +298,7 @@ pub fn executeBlockFromAlloc(
 ) !ExecuteBlockResult {
     try block_validation.validateBlock(env, spec);
     const result = try transition_mod.transition(alloc, pre_alloc, env, txs, spec, chain_id, reward);
-    try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used);
+    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, &.{}, &.{});
     const post_state_root = try output_mod.computeStateRoot(alloc, result.alloc, &.{});
     const receipts_root = try output_mod.computeReceiptsRoot(alloc, result.receipts);
     return .{
@@ -305,6 +306,7 @@ pub fn executeBlockFromAlloc(
         .receipts_root = receipts_root,
         .post_alloc = result.alloc,
         .receipts = result.receipts,
+        .bal_hash = result.bal_hash,
     };
 }
 
@@ -377,8 +379,7 @@ pub fn executeBlockStateless(
     );
     const access_log = witness_db.takeAccessLog();
     const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts);
-    try block_validation.validateBlockAccessList(alloc, ep.block_access_list, accessed, spec);
-    try block_validation.validatePostExecution(env, spec, result.cumulative_gas, result.blob_gas_used);
+    try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);
 }
 
