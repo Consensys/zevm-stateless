@@ -13,6 +13,8 @@ const ELASTICITY_MULTIPLIER: u64 = 2;
 const GAS_PER_BLOB: u64 = 131_072;
 // EIP-7918 blob reserve price constant (2^13)
 const BLOB_BASE_COST: u64 = 8_192;
+// EIP-7934 max RLP-encoded block size (8 MiB)
+const MAX_RLP_BLOCK_SIZE: u64 = 8_388_608;
 
 /// Validates block-level invariants before execution.
 /// Returns an error if the block header is invalid.
@@ -60,7 +62,7 @@ pub fn validateBlock(env: types.Env, spec: primitives.SpecId) !void {
     // BLOCK_RLP_TOO_LARGE (EIP-7934, Osaka+)
     if (primitives.isEnabledIn(spec, .osaka)) {
         if (env.block_rlp_size) |sz| {
-            if (sz > 8_388_608) return error.BlockRlpTooLarge;
+            if (sz > MAX_RLP_BLOCK_SIZE) return error.BlockRlpTooLarge;
         }
     }
 

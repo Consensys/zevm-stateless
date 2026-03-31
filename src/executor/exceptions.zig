@@ -70,6 +70,7 @@ pub const BlockException = enum {
     BLOB_GAS_USED_ABOVE_LIMIT,
     INCORRECT_BLOB_GAS_USED,
     INCORRECT_EXCESS_BLOB_GAS,
+    BLOCK_RLP_TOO_LARGE,
     INVALID_VERSIONED_HASHES,
     RLP_STRUCTURES_ENCODING,
     RLP_WITHDRAWALS_NOT_READ,
@@ -121,6 +122,7 @@ pub fn mapBlockError(err: anyerror) ?[]const u8 {
         error.GasUsedOverflow => E.GAS_USED_OVERFLOW.name(),
         error.InvalidBlockAccessList => E.INVALID_BLOCK_ACCESS_LIST.name(),
         error.BalGasLimitExceeded => E.BLOCK_ACCESS_LIST_GAS_LIMIT_EXCEEDED.name(),
+        error.BlockRlpTooLarge => E.BLOCK_RLP_TOO_LARGE.name(),
         else => null,
     };
 }

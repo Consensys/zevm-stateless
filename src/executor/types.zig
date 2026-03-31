@@ -89,8 +89,8 @@ pub const Env = struct {
     /// post-execution against the actual blob gas consumed by type-3 transactions.
     blob_gas_used_header: ?u64 = null,
     /// Full RLP-encoded block size in bytes (EIP-7934, Osaka+). When set,
-    /// validated in validateBlock against MAX_RLP_BLOCK_SIZE.
-    block_rlp_size: ?usize = null,
+    /// validated in validateBlock against MAX_RLP_BLOCK_SIZE (8 MiB).
+    block_rlp_size: ?u64 = null,
 };
 
 // ─── Receipt / log types ──────────────────────────────────────────────────────
