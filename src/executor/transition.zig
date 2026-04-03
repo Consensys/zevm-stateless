@@ -283,15 +283,8 @@ const BaTracker = struct {
             while (it.next()) |e| {
                 const addr = e.key_ptr.*;
                 const acct = e.value_ptr.*;
-                // Exclude OOG-phantom accounts: explicitly untracked and never modified.
-                // For DBs with tracking (WitnessDatabase), use isTrackedAddress; otherwise include all.
-                if (!acct.status.touched) {
-                    const tracked = if (comptime @hasDecl(@TypeOf(ctx.journaled_state.database), "isTrackedAddress"))
-                        ctx.journaled_state.database.isTrackedAddress(addr)
-                    else
-                        true;
-                    if (!tracked) continue;
-                }
+                // Exclude OOG-phantom accounts: loaded for gas calc but operation went OOG.
+                if (!acct.status.touched and !ctx.journaled_state.isTrackedAddress(addr)) continue;
                 all_addrs.put(a, addr, {}) catch {};
             }
         }
@@ -792,7 +785,6 @@ pub fn transitionWithContext(
         // EIP-7702: type 4 with empty authorization list is invalid.
         if (tx.type == 4 and tx.authorization_list.len == 0) {
             ctx.journaled_state.discardTx();
-            ctx.journaled_state.discardTracking();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
@@ -809,7 +801,6 @@ pub fn transitionWithContext(
         {
             const sender_load = ctx.journaled_state.loadAccount(sender) catch |err| {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -823,7 +814,6 @@ pub fn transitionWithContext(
             const tx_nonce = tx.nonce orelse 0;
             if (sender_info.nonce != tx_nonce) {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -843,7 +833,6 @@ pub fn transitionWithContext(
             const max_cost = max_gas_fee + tx.value + blob_cost;
             if (sender_info.balance < max_cost) {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -864,7 +853,6 @@ pub fn transitionWithContext(
                 const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) 65536 else 49152;
                 if (tx.data.len > max_initcode) {
                     ctx.journaled_state.discardTx();
-                    ctx.journaled_state.discardTracking();
                     if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                     ctx.tx.data = null;
                     ctx.tx.access_list.deinit();
@@ -882,7 +870,6 @@ pub fn transitionWithContext(
             var evm_pre = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack_pre);
             _ = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -900,7 +887,6 @@ pub fn transitionWithContext(
 
         var exec_result = handler_mod.ExecuteEvm.execute(&evm) catch |err| {
             ctx.journaled_state.discardTx();
-            ctx.journaled_state.discardTracking();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
@@ -1009,7 +995,6 @@ pub fn transitionWithContext(
             reward_wei,
         ) catch {};
         ctx.journaled_state.commitTx();
-        ctx.journaled_state.commitTracking();
     }
 
     // ── Apply withdrawals (Shanghai+) ─────────────────────────────────────────
@@ -1023,7 +1008,6 @@ pub fn transitionWithContext(
     }
     if (env.withdrawals.len > 0) {
         ctx.journaled_state.commitTx();
-        ctx.journaled_state.commitTracking();
     }
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────

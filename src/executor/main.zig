@@ -107,7 +107,7 @@ const SYSTEM_ADDRESS: types.Address = .{
 /// and the post-execution alloc delta.  The result is sorted ascending by address.
 fn buildAccessedEntries(
     alloc: std.mem.Allocator,
-    access_log: db_mod.AccessLog,
+    access_log: context_mod.AccessLog,
     post_alloc: std.AutoHashMapUnmanaged(types.Address, types.AllocAccount),
     deleted_accounts: []const types.Address,
 ) ![]types.AccessedEntry {
@@ -229,7 +229,7 @@ fn buildAccessedEntries(
         // Skip addresses that aren't real state changes (coinbase zero-balance etc.)
         const p = kv.value_ptr.*;
         // Empty pre-state for accounts not in the access log.
-        const pre_empty = db_mod.AccountPreState{};
+        const pre_empty = context_mod.AccountPreState{};
         const is_deleted = for (deleted_accounts) |da| {
             if (std.mem.eql(u8, &da, &address)) break true;
         } else false;
@@ -378,7 +378,8 @@ pub fn executeBlockStateless(
         fork_mod.blockReward(spec),
         public_keys,
     );
-    const access_log = ctx.journaled_state.database.takeAccessLog();
+    var access_log = ctx.journaled_state.takeAccessLog();
+    defer access_log.deinit();
     const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts);
     try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);
