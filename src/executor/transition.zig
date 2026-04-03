@@ -530,8 +530,7 @@ pub fn transitionWithDb(
     public_keys: []const []const u8,
 ) !TransitionResult {
     const DB = @TypeOf(db);
-    var db_owned = db;
-    var ctx = context_mod.Context.new(database_mod.Database.forDb(DB, &db_owned), spec);
+    var ctx = context_mod.Context(DB).new(db, spec);
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
@@ -868,7 +867,7 @@ pub fn transitionWithContext(
             // Intrinsic gas check: call validateInitialTxGas via a temporary EVM instance.
             // ctx.tx is fully populated at this point (kind, data, access_list, etc.).
             var frame_stack_pre = handler_mod.FrameStack.new();
-            var evm_pre = handler_mod.Evm.init(ctx, null, &instructions, &precompiles, &frame_stack_pre);
+            var evm_pre = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack_pre);
             _ = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
                 ctx.journaled_state.discardTx();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
@@ -884,7 +883,7 @@ pub fn transitionWithContext(
 
         // 4. Execute
         var frame_stack = handler_mod.FrameStack.new();
-        var evm = handler_mod.Evm.init(ctx, null, &instructions, &precompiles, &frame_stack);
+        var evm = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack);
 
         var exec_result = handler_mod.ExecuteEvm.execute(&evm) catch |err| {
             ctx.journaled_state.discardTx();

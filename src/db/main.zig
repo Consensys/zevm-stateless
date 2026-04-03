@@ -4,9 +4,8 @@
 //! via NodeIndex O(1) node lookups). Contract bytecodes are served via linear scan
 //! over the (bounded) codes pool.
 //!
-//! Used with the type-erased Database vtable:
-//!   var witness_db = WitnessDatabase.init(...);
-//!   var ctx = context.Context.new(context.Database.forDb(WitnessDatabase, &witness_db), spec);
+//! Used directly as the DB type in Context(WitnessDatabase):
+//!   var ctx = context.Context(WitnessDatabase).new(witness_db, spec);
 //!
 //! Implements the zevm DB interface (basic, codeByHash, storage, blockHash).
 //! EIP-7928 BAL tracking is handled by the Journal layer — no tracking state here.

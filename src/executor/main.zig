@@ -360,8 +360,8 @@ pub fn executeBlockStateless(
 
     // Use WitnessDatabase directly as the EVM database type.
     // All account/storage reads are served via live MPT proof verification.
-    var witness_db = db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes);
-    var ctx = context_mod.Context.new(context_mod.Database.forDb(db_mod.WitnessDatabase, &witness_db), spec);
+    const witness_db = db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes);
+    var ctx = context_mod.Context(db_mod.WitnessDatabase).new(witness_db, spec);
     ctx.block = transition_mod.buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
