@@ -58,7 +58,7 @@ const EIP7251_ADDRESS: input.Address = .{
 /// Discards state and returns on any execution error — a broken system
 /// contract must not invalidate the block.
 fn runSystemCall(
-    ctx: *context_mod.Context,
+    ctx: anytype,
     instructions: *handler_mod.Instructions,
     precompiles: *handler_mod.Precompiles,
     target: input.Address,
@@ -75,12 +75,12 @@ fn runSystemCall(
     // block would see it as warm (cheap) instead of cold (EIP-2929).
     const account_load = ctx.journaled_state.loadAccount(target) catch {
         ctx.journaled_state.discardTx();
-        ctx.journaled_state.database.discardTracking();
+        ctx.journaled_state.discardTracking();
         return;
     };
     if (std.mem.eql(u8, &account_load.data.info.code_hash, &primitives.KECCAK_EMPTY)) {
         ctx.journaled_state.discardTx();
-        ctx.journaled_state.database.discardTracking();
+        ctx.journaled_state.discardTracking();
         return;
     }
 
@@ -126,7 +126,8 @@ fn runSystemCall(
     ctx.tx.chain_id = chain_id;
 
     var frames = handler_mod.FrameStack.new();
-    var evm = handler_mod.Evm.init(ctx, null, instructions, precompiles, &frames);
+    const EvmT = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType);
+    var evm = EvmT.init(ctx, null, instructions, precompiles, &frames);
     var result = handler_mod.ExecuteEvm.execute(&evm) catch {
         ctx.journaled_state.discardTx();
         if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
@@ -145,7 +146,7 @@ fn runSystemCall(
     }
 
     // Notify the fallback database that this system call committed successfully.
-    ctx.journaled_state.database.commitTracking();
+    ctx.journaled_state.commitTracking();
 }
 
 // ─── Pre-block system calls ───────────────────────────────────────────────────
@@ -154,7 +155,7 @@ fn runSystemCall(
 /// executing user transactions. Each call passes the relevant 32-byte hash as
 /// calldata; the contract code handles the storage write.
 pub fn applyPreBlockCalls(
-    ctx: *context_mod.Context,
+    ctx: anytype,
     instructions: *handler_mod.Instructions,
     precompiles: *handler_mod.Precompiles,
     env: input.Env,
@@ -181,7 +182,7 @@ pub fn applyPreBlockCalls(
 /// Per EIP-7002/7251: if the contract has no code the call is silently skipped,
 /// matching the same fail-safe behaviour as the pre-block system calls.
 pub fn applyPostBlockCalls(
-    ctx: *context_mod.Context,
+    ctx: anytype,
     instructions: *handler_mod.Instructions,
     precompiles: *handler_mod.Precompiles,
     spec: primitives.SpecId,

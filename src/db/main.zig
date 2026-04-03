@@ -4,11 +4,13 @@
 //! via NodeIndex O(1) node lookups). Contract bytecodes are served via linear scan
 //! over the (bounded) codes pool.
 //!
-//! Wired into execution via InMemoryDB.fallback (see database.FallbackFns).
-//! zevm's EVM execution stack is hardcoded to InMemoryDB throughout; making it
-//! fully generic would require refactoring the interpreter opcode system.  The
-//! fallback vtable is the minimal workaround: InMemoryDB starts empty so every
-//! read misses and falls through to WitnessDatabase.
+//! Used directly as the DB type in Context(WitnessDatabase):
+//!   var ctx = context.Context(WitnessDatabase).new(witness_db, spec);
+//!
+//! Implements the zevm DB interface (basic, codeByHash, storage, blockHash) plus
+//! optional tracking methods detected at compile time via @hasDecl in Journal(DB):
+//!   snapshotFrame, commitFrame, revertFrame, commitTracking, discardTracking,
+//!   notifyStorageSlotCommit, notifyStorageRead, untrackAddress, forceTrackAddress.
 
 const std = @import("std");
 const primitives = @import("primitives");
@@ -16,7 +18,6 @@ const state = @import("state");
 const bytecode = @import("bytecode");
 const mpt = @import("mpt");
 const types = @import("executor_types");
-const database = @import("database");
 
 pub const DbError = error{
     /// MPT proof verification failed — witness is inconsistent with state root.
@@ -51,14 +52,20 @@ pub const AccessLog = struct {
 
 /// Stateless database built from a pre-built NodeIndex + pre-state root.
 ///
-/// Used as a fallback on InMemoryDB for stateless block execution:
-///   db.fallback = witness_db.buildFallback();
+/// Used directly as the DB type for stateless block execution:
+///   var ctx = context.Context(WitnessDatabase).new(witness_db, spec);
 ///
 /// Implements duck-typed Database interface (same methods as InMemoryDB):
 ///   basic(address)              → ?AccountInfo
 ///   codeByHash(code_hash)       → Bytecode
 ///   storage(address, key)       → StorageValue
 ///   blockHash(number)           → Hash
+///
+/// Tracking methods (detected via @hasDecl in Journal wrappers, no-ops for InMemoryDB):
+///   snapshotFrame, commitFrame, revertFrame,
+///   commitTracking, discardTracking,
+///   notifyStorageSlotCommit, notifyStorageRead,
+///   untrackAddress, forceTrackAddress
 pub const WitnessDatabase = struct {
     node_index: *const mpt.NodeIndex,
     pre_state_root: primitives.Hash,
@@ -70,9 +77,9 @@ pub const WitnessDatabase = struct {
     pre_accounts: std.AutoHashMapUnmanaged(primitives.Address, AccountPreState),
     /// Pre-state storage values for each slot accessed via storage() — committed only.
     pre_storage: std.AutoHashMapUnmanaged(primitives.Address, std.AutoHashMapUnmanaged(primitives.StorageKey, primitives.StorageValue)),
-    /// Per-tx pending account accesses (flushed to pre_accounts on commitTx, dropped on discardTx).
+    /// Per-tx pending account accesses (flushed to pre_accounts on commitTracking, dropped on discardTracking).
     pending_accounts: std.AutoHashMapUnmanaged(primitives.Address, AccountPreState),
-    /// Per-tx pending storage accesses (flushed to pre_storage on commitTx, dropped on discardTx).
+    /// Per-tx pending storage accesses (flushed to pre_storage on commitTracking, dropped on discardTracking).
     pending_storage: std.AutoHashMapUnmanaged(primitives.Address, std.AutoHashMapUnmanaged(primitives.StorageKey, primitives.StorageValue)),
     /// Per-frame account key lists for checkpoint-aware rollback.
     /// When snapshotFrame() is called, a new list is pushed. revertFrame() pops it and removes
@@ -81,12 +88,30 @@ pub const WitnessDatabase = struct {
     /// Per-frame storage key lists for checkpoint-aware rollback.
     frame_storage: std.ArrayListUnmanaged(std.ArrayListUnmanaged(struct { addr: primitives.Address, slot: primitives.StorageKey })),
     /// Slots that were committed to a value different from their pre-block value at any tx boundary.
-    /// Populated via the pre_commit_tx_slot fallback hook (called before each commitTx()).
+    /// Populated via notifyStorageSlotCommit (called before each commitTracking()).
     /// Used to distinguish cross-tx net-zero writes (storageChanges) from within-tx net-zero
     /// writes (storageReads) for EIP-7928 BAL validation.
     committed_changed_storage: std.AutoHashMapUnmanaged(primitives.Address, std.AutoHashMapUnmanaged(primitives.StorageKey, void)),
 
     const Self = @This();
+
+    pub fn deinit(self: *Self) void {
+        self.pre_accounts.deinit(self.tracking_alloc);
+        var pre_it = self.pre_storage.valueIterator();
+        while (pre_it.next()) |v| v.deinit(self.tracking_alloc);
+        self.pre_storage.deinit(self.tracking_alloc);
+        self.pending_accounts.deinit(self.tracking_alloc);
+        var pend_it = self.pending_storage.valueIterator();
+        while (pend_it.next()) |v| v.deinit(self.tracking_alloc);
+        self.pending_storage.deinit(self.tracking_alloc);
+        for (self.frame_accounts.items) |*fa| fa.deinit(self.tracking_alloc);
+        self.frame_accounts.deinit(self.tracking_alloc);
+        for (self.frame_storage.items) |*fs| fs.deinit(self.tracking_alloc);
+        self.frame_storage.deinit(self.tracking_alloc);
+        var cs_it = self.committed_changed_storage.valueIterator();
+        while (cs_it.next()) |v| v.deinit(self.tracking_alloc);
+        self.committed_changed_storage.deinit(self.tracking_alloc);
+    }
 
     pub fn init(
         alloc: std.mem.Allocator,
@@ -111,9 +136,11 @@ pub const WitnessDatabase = struct {
         };
     }
 
+    // ── EIP-7928 tracking methods (detected via @hasDecl in Journal wrappers) ──
+
     /// Commit pending per-tx tracking to the permanent access log.
     /// Called after a transaction commits successfully (including system calls).
-    pub fn commitTxTracking(self: *Self) void {
+    pub fn commitTracking(self: *Self) void {
         // Merge pending_accounts → pre_accounts (first-access only)
         var it = self.pending_accounts.iterator();
         while (it.next()) |kv| {
@@ -143,7 +170,7 @@ pub const WitnessDatabase = struct {
     }
 
     /// Record that a storage slot was committed with a value differing from its pre-block value.
-    /// Called via the pre_commit_tx_slot fallback, BEFORE commitTx() resets original_value.
+    /// Called via notifyStorageSlotCommit Journal wrapper, BEFORE commitTracking() resets original_value.
     /// Marks the slot so buildAccessedEntries can classify it as storageChange (not storageRead)
     /// even when its final post-block value equals its pre-block value (cross-tx net-zero write).
     pub fn notifyStorageSlotCommit(self: *Self, address: primitives.Address, slot: primitives.StorageKey, committed_value: primitives.StorageValue) void {
@@ -165,7 +192,7 @@ pub const WitnessDatabase = struct {
     }
 
     /// Discard pending per-tx tracking (transaction was reverted or invalid).
-    pub fn discardTxTracking(self: *Self) void {
+    pub fn discardTracking(self: *Self) void {
         self.pending_accounts.clearRetainingCapacity();
         var it = self.pending_storage.valueIterator();
         while (it.next()) |v| v.clearRetainingCapacity();
@@ -179,13 +206,13 @@ pub const WitnessDatabase = struct {
 
     /// Push a new frame level for checkpoint-aware tracking.
     /// Called when a CALL/CREATE opens a journal checkpoint.
-    pub fn snapshotFrameTracking(self: *Self) void {
+    pub fn snapshotFrame(self: *Self) void {
         self.frame_accounts.append(self.tracking_alloc, .{}) catch {};
         self.frame_storage.append(self.tracking_alloc, .{}) catch {};
     }
 
     /// Current frame committed — pop its lists (entries stay in pending).
-    pub fn commitFrameTracking(self: *Self) void {
+    pub fn commitFrame(self: *Self) void {
         if (self.frame_accounts.pop()) |fa_val| {
             var fa = fa_val;
             fa.deinit(self.tracking_alloc);
@@ -197,7 +224,7 @@ pub const WitnessDatabase = struct {
     }
 
     /// Current frame reverted — EIP-7928 keeps reverted accesses in BAL, so just pop like commit.
-    pub fn revertFrameTracking(self: *Self) void {
+    pub fn revertFrame(self: *Self) void {
         if (self.frame_accounts.pop()) |fa_val| {
             var fa = fa_val;
             fa.deinit(self.tracking_alloc);
@@ -213,13 +240,13 @@ pub const WitnessDatabase = struct {
     /// (new_account_cost check) but then went OOG before the call executed.
     /// Only removes from pending_accounts; never removes from pre_accounts
     /// (which holds commits from earlier txs).
-    pub fn untrackPendingAddress(self: *Self, address: primitives.Address) void {
+    pub fn untrackAddress(self: *Self, address: primitives.Address) void {
         _ = self.pending_accounts.remove(address);
     }
 
     /// Returns true if the address is in the committed or pending access log.
     /// Used by BaTracker to distinguish legitimately-accessed nonexistent accounts
-    /// from those only loaded for OOG gas calculation (which are removed via untrackPendingAddress).
+    /// from those only loaded for OOG gas calculation (which are removed via untrackAddress).
     pub fn isTrackedAddress(self: *Self, address: primitives.Address) bool {
         return self.pre_accounts.contains(address) or self.pending_accounts.contains(address);
     }
@@ -227,16 +254,34 @@ pub const WitnessDatabase = struct {
     /// Force-add an address to the current-tx pending access log with an empty
     /// pre-state snapshot. Used for EIP-7702 delegation targets that are accessed
     /// (their code executes) but whose account state is not proven in the witness.
-    pub fn forceTrackPendingAddress(self: *Self, address: primitives.Address) void {
+    pub fn forceTrackAddress(self: *Self, address: primitives.Address) void {
         if (self.pre_accounts.contains(address) or self.pending_accounts.contains(address)) return;
         self.pending_accounts.put(self.tracking_alloc, address, .{}) catch {};
+    }
+
+    /// Record a storage slot access on a newly-created account (pre-state value is implicitly 0).
+    /// Called by the Journal sload wrapper when the account was just created in this execution.
+    pub fn notifyStorageRead(self: *Self, address: primitives.Address, slot: primitives.StorageKey) void {
+        const already_committed = if (self.pre_storage.get(address)) |perm| perm.contains(slot) else false;
+        const already_pending = if (self.pending_storage.get(address)) |pend| pend.contains(slot) else false;
+        if (!already_committed and !already_pending) {
+            const addr_entry = self.pending_storage.getOrPut(self.tracking_alloc, address) catch return;
+            if (!addr_entry.found_existing) addr_entry.value_ptr.* = .{};
+            addr_entry.value_ptr.*.put(self.tracking_alloc, slot, 0) catch {};
+            if (self.frame_storage.items.len > 0) {
+                self.frame_storage.items[self.frame_storage.items.len - 1].append(
+                    self.tracking_alloc,
+                    .{ .addr = address, .slot = slot },
+                ) catch {};
+            }
+        }
     }
 
     /// Drain and return the accumulated access log, resetting internal state.
     pub fn takeAccessLog(self: *Self) AccessLog {
         // Flush any uncommitted pending (e.g., post-block system calls that don't
-        // go through the normal commitTx path).
-        self.commitTxTracking();
+        // go through the normal commitTracking path).
+        self.commitTracking();
         const log = AccessLog{
             .accounts = self.pre_accounts,
             .storage = self.pre_storage,
@@ -258,7 +303,7 @@ pub const WitnessDatabase = struct {
         ) catch |err| switch (err) {
             // InvalidProof means the witness doesn't include proof nodes for this account.
             // Treat as non-existent (e.g., precompile addresses have no witness proof).
-            // Still track the access so EIP-7928 BAL includes it; untrackPendingAddress()
+            // Still track the access so EIP-7928 BAL includes it; untrackAddress()
             // will remove it later if the access turns out to be an OOG gas-calc phantom.
             error.InvalidProof => {
                 if (!self.pre_accounts.contains(address) and !self.pending_accounts.contains(address)) {
@@ -276,7 +321,7 @@ pub const WitnessDatabase = struct {
             else => return DbError.InvalidWitness,
         };
 
-        // Track pre-state in pending (flushed to pre_accounts on commitTx).
+        // Track pre-state in pending (flushed to pre_accounts on commitTracking).
         // Use pending so that accesses from reverted transactions are discarded.
         // Also track in the current frame so checkpoint reverts can remove it.
         if (!self.pre_accounts.contains(address) and !self.pending_accounts.contains(address)) {
@@ -350,7 +395,7 @@ pub const WitnessDatabase = struct {
             else => return DbError.InvalidWitness,
         };
 
-        // Track pre-state storage value in pending (flushed to pre_storage on commitTx).
+        // Track pre-state storage value in pending (flushed to pre_storage on commitTracking).
         // Skip if already in permanent storage (already committed from an earlier tx).
         const already_committed = if (self.pre_storage.get(address)) |perm| perm.contains(index) else false;
         const already_pending = if (self.pending_storage.get(address)) |pend| pend.contains(index) else false;
@@ -379,113 +424,6 @@ pub const WitnessDatabase = struct {
             if (bhe.number == number) return bhe.hash;
         }
         return [_]u8{0} ** 32;
-    }
-
-    // ── FallbackFns builder ─────────────────────────────────────────────────
-
-    /// Build a FallbackFns vtable that routes InMemoryDB fallback calls to this WitnessDatabase.
-    pub fn buildFallback(self: *Self) database.FallbackFns {
-        return .{
-            .ctx = @ptrCast(self),
-            .basic = basicFallback,
-            .code_by_hash = codeByHashFallback,
-            .storage = storageFallback,
-            .block_hash = blockHashFallback,
-            .commit_tx = commitTxFallback,
-            .discard_tx = discardTxFallback,
-            .snapshot_frame = snapshotFrameFallback,
-            .commit_frame = commitFrameFallback,
-            .revert_frame = revertFrameFallback,
-            .untrack_address = untrackAddressFallback,
-            .force_track_address = forceTrackAddressFallback,
-            .pre_commit_tx_slot = preCommitTxSlotFallback,
-            .notify_storage_read = notifyStorageReadFallback,
-            .is_tracked_address = isTrackedAddressFallback,
-        };
-    }
-
-    fn basicFallback(ctx: *anyopaque, address: primitives.Address) anyerror!?state.AccountInfo {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        return self.basic(address);
-    }
-
-    fn codeByHashFallback(ctx: *anyopaque, code_hash: primitives.Hash) anyerror!bytecode.Bytecode {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        return self.codeByHash(code_hash);
-    }
-
-    fn storageFallback(ctx: *anyopaque, address: primitives.Address, index: primitives.StorageKey) anyerror!primitives.StorageValue {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        return self.storage(address, index);
-    }
-
-    fn blockHashFallback(ctx: *anyopaque, number: u64) anyerror!primitives.Hash {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        return self.blockHash(number);
-    }
-
-    fn commitTxFallback(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.commitTxTracking();
-    }
-
-    fn discardTxFallback(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.discardTxTracking();
-    }
-
-    fn snapshotFrameFallback(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.snapshotFrameTracking();
-    }
-
-    fn commitFrameFallback(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.commitFrameTracking();
-    }
-
-    fn revertFrameFallback(ctx: *anyopaque) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.revertFrameTracking();
-    }
-
-    fn untrackAddressFallback(ctx: *anyopaque, address: primitives.Address) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.untrackPendingAddress(address);
-    }
-
-    fn forceTrackAddressFallback(ctx: *anyopaque, address: primitives.Address) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.forceTrackPendingAddress(address);
-    }
-
-    fn preCommitTxSlotFallback(ctx: *anyopaque, address: primitives.Address, slot: primitives.StorageKey, committed_value: primitives.StorageValue) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        self.notifyStorageSlotCommit(address, slot, committed_value);
-    }
-
-    fn isTrackedAddressFallback(ctx: *anyopaque, address: primitives.Address) bool {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        return self.isTrackedAddress(address);
-    }
-
-    fn notifyStorageReadFallback(ctx: *anyopaque, address: primitives.Address, slot: primitives.StorageKey) void {
-        const self: *Self = @ptrCast(@alignCast(ctx));
-        // For newly-created accounts the pre-state value is implicitly 0.
-        // Record it in pending_storage so it shows up in the access log.
-        const already_committed = if (self.pre_storage.get(address)) |perm| perm.contains(slot) else false;
-        const already_pending = if (self.pending_storage.get(address)) |pend| pend.contains(slot) else false;
-        if (!already_committed and !already_pending) {
-            const addr_entry = self.pending_storage.getOrPut(self.tracking_alloc, address) catch return;
-            if (!addr_entry.found_existing) addr_entry.value_ptr.* = .{};
-            addr_entry.value_ptr.*.put(self.tracking_alloc, slot, 0) catch {};
-            if (self.frame_storage.items.len > 0) {
-                self.frame_storage.items[self.frame_storage.items.len - 1].append(
-                    self.tracking_alloc,
-                    .{ .addr = address, .slot = slot },
-                ) catch {};
-            }
-        }
     }
 };
 

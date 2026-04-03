@@ -150,6 +150,16 @@ pub const ExecutionWitness = struct {
     headers: []const []const u8, // RLP ancestor block headers
 };
 
+/// Witness with an explicit pre-state root and key list, used by the MPT
+/// proof verifier (mpt.verifyWitness) and unit tests.
+pub const StateWitness = struct {
+    state_root: primitives.Hash,
+    nodes: []const []const u8,
+    codes: []const []const u8,
+    keys: []const []const u8,
+    headers: []const []const u8,
+};
+
 pub const ChainConfig = struct {
     chain_id: u64 = 1,
 };

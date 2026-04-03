@@ -69,9 +69,6 @@ const KnownAcct = struct {
 
 const BaTracker = struct {
     alloc: std.mem.Allocator,
-    /// Reference to the InMemoryDB used for lazy committed-state initialization.
-    /// Allows correct BAL computation on the stateless path where pre_alloc_in is empty.
-    db: *database_mod.InMemoryDB,
     // Last committed account state (updated after each phase)
     committed: std.AutoHashMapUnmanaged(input.Address, KnownAcct),
     committed_storage: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, u256)),
@@ -83,10 +80,9 @@ const BaTracker = struct {
     // Storage slots written then wiped by same-tx SELFDESTRUCT → appear as storage_reads, no changes.
     selfdestruct_reads: std.AutoHashMapUnmanaged(input.Address, std.AutoHashMapUnmanaged(u256, void)),
 
-    fn initFromPreAlloc(a: std.mem.Allocator, pre: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount), db: *database_mod.InMemoryDB) BaTracker {
+    fn initFromPreAlloc(a: std.mem.Allocator, pre: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount)) BaTracker {
         var self = BaTracker{
             .alloc = a,
-            .db = db,
             .committed = .{},
             .committed_storage = .{},
             .bal_chg = .{},
@@ -117,7 +113,7 @@ const BaTracker = struct {
         return self;
     }
 
-    fn detectAndRecord(self: *BaTracker, bai: u64, ctx: *context_mod.Context) void {
+    fn detectAndRecord(self: *BaTracker, bai: u64, ctx: anytype) void {
         const a = self.alloc;
         var it = ctx.journaled_state.inner.evm_state.iterator();
         while (it.next()) |e| {
@@ -142,7 +138,7 @@ const BaTracker = struct {
                 if (self.committed.get(addr)) |k| break :blk k;
                 // Lazy init: query DB for pre-block state (handles stateless path where
                 // pre_alloc_in is empty and committed was not seeded for this account).
-                const pre = self.db.basic(addr) catch null;
+                const pre = ctx.journaled_state.database.basic(addr) catch null;
                 const k: KnownAcct = if (pre) |p| .{
                     .balance = p.balance,
                     .nonce = p.nonce,
@@ -206,7 +202,7 @@ const BaTracker = struct {
                         if (sm.get(slot)) |v| break :blk_slot v;
                     }
                     // Lazy init: query DB for the pre-block value (handles stateless path).
-                    const db_val = self.db.storage(addr, slot) catch 0;
+                    const db_val = ctx.journaled_state.database.storage(addr, slot) catch 0;
                     if (db_val != 0) {
                         const sm2 = self.committed_storage.getOrPut(self.alloc, addr) catch break :blk_slot db_val;
                         if (!sm2.found_existing) sm2.value_ptr.* = .{};
@@ -243,7 +239,7 @@ const BaTracker = struct {
         }
     }
 
-    fn computeHash(self: *BaTracker, a: std.mem.Allocator, ctx: *context_mod.Context, gas_limit: u64) ![32]u8 {
+    fn computeHash(self: *BaTracker, a: std.mem.Allocator, ctx: anytype, gas_limit: u64) ![32]u8 {
         // Collect storage reads: all accessed slots NOT in slot_chg.
         // Includes pure reads (was_written=false) AND net-zero writes (was_written=true
         // but value returned to original, so absent from slot_chg).
@@ -288,7 +284,14 @@ const BaTracker = struct {
                 const addr = e.key_ptr.*;
                 const acct = e.value_ptr.*;
                 // Exclude OOG-phantom accounts: explicitly untracked and never modified.
-                if (!acct.status.touched and self.db.isOogAddress(addr)) continue;
+                // For DBs with tracking (WitnessDatabase), use isTrackedAddress; otherwise include all.
+                if (!acct.status.touched) {
+                    const tracked = if (comptime @hasDecl(@TypeOf(ctx.journaled_state.database), "isTrackedAddress"))
+                        ctx.journaled_state.database.isTrackedAddress(addr)
+                    else
+                        true;
+                    if (!tracked) continue;
+                }
                 all_addrs.put(a, addr, {}) catch {};
             }
         }
@@ -468,7 +471,7 @@ fn blobFractionForSpec(spec: primitives.SpecId) u64 {
     return primitives.BLOB_BASE_FEE_UPDATE_FRACTION_CANCUN;
 }
 
-fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
+pub fn buildBlockEnv(env: input.Env, spec: primitives.SpecId) context_mod.BlockEnv {
     var block = context_mod.BlockEnv.default();
     block.number = @as(primitives.U256, env.number);
     block.timestamp = @as(primitives.U256, env.timestamp);
@@ -514,11 +517,13 @@ pub fn transition(
     return transitionWithDb(arena, db, pre_alloc_in, env, txs, spec, chain_id, reward, &.{});
 }
 
-/// Entry point for stateless execution: accepts an InMemoryDB pre-wired with a
-/// WitnessDatabase fallback, plus optional pre-recovered public keys.
+/// Entry point for stateless execution: accepts any DB type (InMemoryDB for the stateful
+/// path, WitnessDatabase for the stateless path), plus optional pre-recovered public keys.
+/// Builds the EVM context internally. Use transitionWithContext when you need access to the
+/// context (and its DB) after execution — e.g., to call witness_db.takeAccessLog().
 pub fn transitionWithDb(
     arena: std.mem.Allocator,
-    db: database_mod.InMemoryDB,
+    db: anytype,
     pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
     env: input.Env,
     txs: []input.TxInput,
@@ -531,25 +536,40 @@ pub fn transitionWithDb(
     /// Empty slice or entry shorter than 64 bytes falls back to ecrecover.
     public_keys: []const []const u8,
 ) !TransitionResult {
-    // ── Build EVM context ──────────────────────────────────────────────────
-    var ctx = context_mod.Context.new(db, spec);
+    const DB = @TypeOf(db);
+    var ctx = context_mod.Context(DB).new(db, spec);
     ctx.block = buildBlockEnv(env, spec);
     ctx.cfg.chain_id = chain_id;
     ctx.cfg.disable_base_fee = (env.base_fee == null);
+    return transitionWithContext(arena, &ctx, pre_alloc_in, env, txs, spec, chain_id, reward, public_keys);
+}
 
+/// Low-level entry point: executes block transition on a pre-built context.
+/// The caller owns the context and can access its DB (e.g., for takeAccessLog) after return.
+pub fn transitionWithContext(
+    arena: std.mem.Allocator,
+    ctx: anytype,
+    pre_alloc_in: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
+    env: input.Env,
+    txs: []input.TxInput,
+    spec: primitives.SpecId,
+    chain_id: u64,
+    reward: i64,
+    public_keys: []const []const u8,
+) !TransitionResult {
     var instructions = handler_mod.Instructions.new(spec);
     var precompiles = handler_mod.Precompiles.new(spec);
 
     // ── EIP-7928 BAL tracker (Amsterdam+) ────────────────────────────────────
     var tracker: ?BaTracker = if (primitives.isEnabledIn(spec, .amsterdam))
-        BaTracker.initFromPreAlloc(arena, pre_alloc_in, &ctx.journaled_state.database)
+        BaTracker.initFromPreAlloc(arena, pre_alloc_in)
     else
         null;
 
     // ── Pre-block system calls (EIP-4788, EIP-2935) ───────────────────────────
-    system_calls.applyPreBlockCalls(&ctx, &instructions, &precompiles, env, spec, chain_id);
+    system_calls.applyPreBlockCalls(ctx, &instructions, &precompiles, env, spec, chain_id);
 
-    if (tracker) |*t| t.detectAndRecord(0, &ctx);
+    if (tracker) |*t| t.detectAndRecord(0, ctx);
 
     var receipts = std.ArrayListUnmanaged(Receipt){};
     var accepted_txs = std.ArrayListUnmanaged(input.TxInput){};
@@ -772,7 +792,7 @@ pub fn transitionWithDb(
         // EIP-7702: type 4 with empty authorization list is invalid.
         if (tx.type == 4 and tx.authorization_list.len == 0) {
             ctx.journaled_state.discardTx();
-            ctx.journaled_state.database.discardTracking();
+            ctx.journaled_state.discardTracking();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
@@ -789,7 +809,7 @@ pub fn transitionWithDb(
         {
             const sender_load = ctx.journaled_state.loadAccount(sender) catch |err| {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.database.discardTracking();
+                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -803,7 +823,7 @@ pub fn transitionWithDb(
             const tx_nonce = tx.nonce orelse 0;
             if (sender_info.nonce != tx_nonce) {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.database.discardTracking();
+                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -823,7 +843,7 @@ pub fn transitionWithDb(
             const max_cost = max_gas_fee + tx.value + blob_cost;
             if (sender_info.balance < max_cost) {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.database.discardTracking();
+                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -844,7 +864,7 @@ pub fn transitionWithDb(
                 const max_initcode: usize = if (primitives.isEnabledIn(spec, .amsterdam)) 65536 else 49152;
                 if (tx.data.len > max_initcode) {
                     ctx.journaled_state.discardTx();
-                    ctx.journaled_state.database.discardTracking();
+                    ctx.journaled_state.discardTracking();
                     if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                     ctx.tx.data = null;
                     ctx.tx.access_list.deinit();
@@ -859,10 +879,10 @@ pub fn transitionWithDb(
             // Intrinsic gas check: call validateInitialTxGas via a temporary EVM instance.
             // ctx.tx is fully populated at this point (kind, data, access_list, etc.).
             var frame_stack_pre = handler_mod.FrameStack.new();
-            var evm_pre = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &frame_stack_pre);
+            var evm_pre = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack_pre);
             _ = handler_mod.Validation.validateInitialTxGas(&evm_pre) catch |err| {
                 ctx.journaled_state.discardTx();
-                ctx.journaled_state.database.discardTracking();
+                ctx.journaled_state.discardTracking();
                 if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
                 ctx.tx.data = null;
                 ctx.tx.access_list.deinit();
@@ -876,11 +896,11 @@ pub fn transitionWithDb(
 
         // 4. Execute
         var frame_stack = handler_mod.FrameStack.new();
-        var evm = handler_mod.Evm.init(&ctx, null, &instructions, &precompiles, &frame_stack);
+        var evm = handler_mod.EvmFor(@TypeOf(ctx.*).DatabaseType).init(ctx, null, &instructions, &precompiles, &frame_stack);
 
         var exec_result = handler_mod.ExecuteEvm.execute(&evm) catch |err| {
             ctx.journaled_state.discardTx();
-            ctx.journaled_state.database.discardTracking();
+            ctx.journaled_state.discardTracking();
             if (ctx.tx.data) |*d| d.deinit(alloc_mod.get());
             ctx.tx.data = null;
             ctx.tx.access_list.deinit();
@@ -966,11 +986,11 @@ pub fn transitionWithDb(
 
         exec_result.deinit();
 
-        if (tracker) |*t| t.detectAndRecord(tx_idx + 1, &ctx);
+        if (tracker) |*t| t.detectAndRecord(tx_idx + 1, ctx);
 
         // Pre-Byzantium (EIP-658 not yet active): compute per-tx intermediate state root.
         if (!primitives.isEnabledIn(spec, .byzantium)) {
-            const per_tx_alloc = extractPostState(arena, pre_alloc_in, &ctx) catch null;
+            const per_tx_alloc = extractPostState(arena, pre_alloc_in, ctx) catch null;
             if (per_tx_alloc) |pa| {
                 const sr = output_mod.computeStateRoot(arena, pa, &.{}) catch null;
                 receipts.items[receipts.items.len - 1].state_root = sr;
@@ -989,7 +1009,7 @@ pub fn transitionWithDb(
             reward_wei,
         ) catch {};
         ctx.journaled_state.commitTx();
-        ctx.journaled_state.database.commitTracking();
+        ctx.journaled_state.commitTracking();
     }
 
     // ── Apply withdrawals (Shanghai+) ─────────────────────────────────────────
@@ -1003,17 +1023,17 @@ pub fn transitionWithDb(
     }
     if (env.withdrawals.len > 0) {
         ctx.journaled_state.commitTx();
-        ctx.journaled_state.database.commitTracking();
+        ctx.journaled_state.commitTracking();
     }
 
     // ── Post-block system calls (EIP-7002, EIP-7251) ──────────────────────────
-    system_calls.applyPostBlockCalls(&ctx, &instructions, &precompiles, spec, chain_id);
+    system_calls.applyPostBlockCalls(ctx, &instructions, &precompiles, spec, chain_id);
 
     // Detect changes from mining reward + withdrawals + post-block calls (all at BAI=N+1)
-    if (tracker) |*t| t.detectAndRecord(txs.len + 1, &ctx);
+    if (tracker) |*t| t.detectAndRecord(txs.len + 1, ctx);
 
     // ── Extract post-state ────────────────────────────────────────────────────
-    const post_alloc = try extractPostState(arena, pre_alloc_in, &ctx);
+    const post_alloc = try extractPostState(arena, pre_alloc_in, ctx);
 
     // Collect selfdestructed accounts for delta-root deletion
     var deleted = std.ArrayListUnmanaged(input.Address){};
@@ -1026,7 +1046,7 @@ pub fn transitionWithDb(
         }
     }
 
-    const bal_hash: ?[32]u8 = if (tracker) |*t| t.computeHash(arena, &ctx, env.gas_limit) catch null else null;
+    const bal_hash: ?[32]u8 = if (tracker) |*t| t.computeHash(arena, ctx, env.gas_limit) catch null else null;
 
     return TransitionResult{
         .alloc = post_alloc,
@@ -1048,7 +1068,7 @@ pub fn transitionWithDb(
 fn extractPostState(
     arena: std.mem.Allocator,
     pre_alloc: std.AutoHashMapUnmanaged(input.Address, input.AllocAccount),
-    ctx: *context_mod.Context,
+    ctx: anytype,
 ) !std.AutoHashMapUnmanaged(input.Address, input.AllocAccount) {
     // Start with a mutable copy of pre_alloc (use arena allocation for storage maps)
     var post = std.AutoHashMapUnmanaged(input.Address, input.AllocAccount){};

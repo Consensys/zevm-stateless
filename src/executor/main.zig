@@ -23,7 +23,7 @@ const fork_mod = @import("hardfork");
 const tx_decode = @import("executor_tx_decode");
 const types = @import("executor_types");
 const db_mod = @import("db");
-const database_mod = @import("database");
+const context_mod = @import("context");
 const block_validation = @import("executor_block_validation");
 
 /// Re-export so callers can use these types without importing executor_types directly.
@@ -358,16 +358,18 @@ pub fn executeBlockStateless(
     try block_validation.validateBlock(env, spec);
     const txs = try tx_decode.decodeTxsFromInput(alloc, ep.transactions);
 
-    // Wire WitnessDatabase as fallback on an empty InMemoryDB.
-    // All account/storage reads during EVM execution are served via live MPT proof verification.
-    var witness_db = db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes);
-    var db = database_mod.InMemoryDB.init(alloc);
-    db.fallback = witness_db.buildFallback();
+    // Use WitnessDatabase directly as the EVM database type.
+    // All account/storage reads are served via live MPT proof verification.
+    const witness_db = db_mod.WitnessDatabase.init(alloc, node_index, pre_state_root, witness_codes, block_hashes);
+    var ctx = context_mod.Context(db_mod.WitnessDatabase).new(witness_db, spec);
+    ctx.block = transition_mod.buildBlockEnv(env, spec);
+    ctx.cfg.chain_id = chain_id;
+    ctx.cfg.disable_base_fee = (env.base_fee == null);
 
     const empty_pre_alloc = std.AutoHashMapUnmanaged(types.Address, types.AllocAccount){};
-    const result = try transition_mod.transitionWithDb(
+    const result = try transition_mod.transitionWithContext(
         alloc,
-        db,
+        &ctx,
         empty_pre_alloc,
         env,
         txs,
@@ -376,7 +378,7 @@ pub fn executeBlockStateless(
         fork_mod.blockReward(spec),
         public_keys,
     );
-    const access_log = witness_db.takeAccessLog();
+    const access_log = ctx.journaled_state.database.takeAccessLog();
     const accessed = try buildAccessedEntries(alloc, access_log, result.alloc, result.deleted_accounts);
     try block_validation.validatePostExecution(alloc, env, spec, result.cumulative_gas, result.blob_gas_used, ep.block_access_list, accessed);
     return finalizeOutput(alloc, pre_state_root, result, node_index, spec);

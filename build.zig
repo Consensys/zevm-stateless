@@ -122,6 +122,7 @@ pub fn build(b: *std.Build) void {
     executor_mod.addImport("primitives", primitives);
     executor_mod.addImport("state", state);
     executor_mod.addImport("bytecode", bytecode);
+    executor_mod.addImport("context", context);
     executor_mod.addImport("database", database);
     executor_mod.addImport("handler", handler);
     executor_mod.addImport("precompile", precompile);

@@ -136,6 +136,17 @@ fn buildEmptyBranchNode(buf: []u8) usize {
     return 18;
 }
 
+// ─── Helper ───────────────────────────────────────────────────────────────────
+
+const ALLOC = std.testing.allocator;
+
+/// Build a NodeIndex from a StateWitness and construct a WitnessDatabase.
+/// Caller must call `index.deinit()` when done.
+fn makeWdb(w: input.StateWitness, index: *mpt.NodeIndex) !db_mod.WitnessDatabase {
+    index.* = try mpt.buildNodeIndex(ALLOC, w.nodes);
+    return db_mod.WitnessDatabase.init(ALLOC, index, w.state_root, w.codes, &.{});
+}
+
 // ─── Test 1: basic — account found in pool ────────────────────────────────────
 
 test "basic returns verified AccountInfo" {
@@ -158,7 +169,10 @@ test "basic returns verified AccountInfo" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const info = try wdb.basic(address);
     try std.testing.expect(info != null);
     try std.testing.expectEqual(@as(u64, 7), info.?.nonce);
@@ -183,7 +197,10 @@ test "basic returns null for valid non-inclusion proof (empty trie)" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const info = try wdb.basic(address);
     try std.testing.expect(info == null);
 }
@@ -214,7 +231,10 @@ test "basic returns null when queried address differs from trie leaf" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const info = try wdb.basic(addr2);
     try std.testing.expect(info == null);
 }
@@ -229,7 +249,10 @@ test "codeByHash(KECCAK_EMPTY) returns empty Bytecode" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const code = try wdb.codeByHash(KECCAK_EMPTY);
     try std.testing.expect(code.isEmpty());
 }
@@ -247,7 +270,10 @@ test "codeByHash returns contract bytecode from witness.codes" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const code = try wdb.codeByHash(code_hash);
     try std.testing.expect(!code.isEmpty());
     try std.testing.expectEqualSlices(u8, contract_code, code.bytecode());
@@ -299,7 +325,10 @@ test "storage returns verified slot value" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const value = try wdb.storage(address, slot_key);
     try std.testing.expectEqual(@as(u256, 0xabcd), value);
 }
@@ -329,7 +358,10 @@ test "storage returns 0 for account with empty storage trie" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const value = try wdb.storage(address, 42);
     try std.testing.expectEqual(@as(u256, 0), value);
 }
@@ -344,7 +376,10 @@ test "blockHash returns zero hash (Phase 3 placeholder)" {
         .keys = &.{},
         .headers = &.{},
     };
-    var wdb = db_mod.WitnessDatabase.init(w);
+    var idx: mpt.NodeIndex = undefined;
+    var wdb = try makeWdb(w, &idx);
+    defer idx.deinit();
+    defer wdb.deinit();
     const hash = try wdb.blockHash(12345678);
     try std.testing.expectEqualSlices(u8, &([_]u8{0} ** 32), &hash);
 }
