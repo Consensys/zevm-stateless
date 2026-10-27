@@ -14,6 +14,11 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
+      - name: Wiz sensor
+        uses: Consensys/github-actions/wiz-sensor@c529b19afef5a8e2ff6993638a99a905de633ddb
+        with:
+          enabled: ${{ vars.WIZ_SENSOR_ENABLED }}
+          token: ${{ secrets.WIZ_SENSOR_TOKEN }}
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
@@ -25,6 +30,11 @@ jobs:
     name: Build
     runs-on: ubuntu-latest
     steps:
+      - name: Wiz sensor
+        uses: Consensys/github-actions/wiz-sensor@c529b19afef5a8e2ff6993638a99a905de633ddb
+        with:
+          enabled: ${{ vars.WIZ_SENSOR_ENABLED }}
+          token: ${{ secrets.WIZ_SENSOR_TOKEN }}
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
@@ -40,6 +50,11 @@ jobs:
     name: Unit Tests
     runs-on: ubuntu-latest
     steps:
+      - name: Wiz sensor
+        uses: Consensys/github-actions/wiz-sensor@c529b19afef5a8e2ff6993638a99a905de633ddb
+        with:
+          enabled: ${{ vars.WIZ_SENSOR_ENABLED }}
+          token: ${{ secrets.WIZ_SENSOR_TOKEN }}
       - uses: actions/checkout@v4
       - uses: mlugg/setup-zig@v2
         with:
